@@ -2,8 +2,9 @@
 
 pub use crate::lares::v1::{
     AnalyzeMode, AnalyzeSceneRequest, AnalyzeSceneResponse, BoundingBox, ChoreEntity,
-    ChoreStatus, IdleContext, ListChoresResponse, Nudge, NudgeRequest, NudgeResponse,
-    ReferenceState, SetChoreStatusRequest, SetReferenceRequest,
+    ChoreStatus, FingerprintKind, FingerprintRecord, IdleContext, Landmark, LandmarkList,
+    ListChoresResponse, ListFingerprintsResponse, Nudge, NudgeRequest, NudgeResponse,
+    ReferenceState, SetChoreStatusRequest, SetFingerprintRequest, SetReferenceRequest,
 };
 
 /// Lower bound of normalized box coordinates.
@@ -12,6 +13,26 @@ pub const BOX_MIN: i32 = 0;
 pub const BOX_MAX: i32 = 1000;
 /// Minimum confidence for a chore to survive post-processing.
 pub const DEFAULT_MIN_CONFIDENCE: f32 = 0.25;
+
+impl FingerprintKind {
+    /// Persisted string form of the fingerprint kind.
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            FingerprintKind::Clean => "clean",
+            FingerprintKind::History => "history",
+            _ => "latest",
+        }
+    }
+
+    /// Parse a persisted string form back into a kind.
+    pub fn parse(value: &str) -> Self {
+        match value {
+            "clean" => FingerprintKind::Clean,
+            "history" => FingerprintKind::History,
+            _ => FingerprintKind::Latest,
+        }
+    }
+}
 
 /// Current unix time in whole seconds, saturating at zero on clock error.
 pub fn now_unix() -> i64 {

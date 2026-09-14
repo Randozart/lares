@@ -236,6 +236,8 @@ lares/
 - Compose + CameraX, permission flow, capture keyframe, POST to server, Canvas
   overlay draws normalized boxes + labels. `adb reverse` for dev.
 - **Verify:** walk the house, boxes render.
+- **Update:** live tracking + cost guards + landmark/state memory supersede the
+  frozen-frame overlay. See [`docs/live-tracking.md`](live-tracking.md).
 
 ### Phase D — Reference-state diffing
 - Capture agreed DoD per room; DIFF-mode prompt compares reference vs current.

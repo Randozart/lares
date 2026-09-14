@@ -7,9 +7,13 @@ import dev.randozart.lares.proto.AnalyzeSceneRequest
 import dev.randozart.lares.proto.AnalyzeSceneResponse
 import dev.randozart.lares.proto.ChoreEntity
 import dev.randozart.lares.proto.ChoreStatus
+import dev.randozart.lares.proto.FingerprintKind
+import dev.randozart.lares.proto.Landmark
+import dev.randozart.lares.proto.LandmarkList
 import dev.randozart.lares.proto.ListChoresResponse
 import dev.randozart.lares.proto.ReferenceState
 import dev.randozart.lares.proto.SetChoreStatusRequest
+import dev.randozart.lares.proto.SetFingerprintRequest
 import dev.randozart.lares.proto.SetReferenceRequest
 import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.OkHttpClient
@@ -93,6 +97,22 @@ class LaresClient {
         val builder = ReferenceState.newBuilder()
         parser.merge(get("$baseUrl/v1/rooms/$roomId/reference"), builder)
         return builder.build()
+    }
+
+    /** Fetch a room's current landmark set. */
+    fun getLandmarks(baseUrl: String, roomId: String): List<Landmark> {
+        val builder = LandmarkList.newBuilder()
+        parser.merge(get("$baseUrl/v1/rooms/$roomId/landmarks"), builder)
+        return builder.build().landmarksList
+    }
+
+    /** Store a room's scene fingerprint (latest/history/clean). */
+    fun setFingerprint(baseUrl: String, roomId: String, kind: FingerprintKind, gridHash: ByteArray) {
+        val request = SetFingerprintRequest.newBuilder()
+            .setKind(kind)
+            .setGridHash(ByteString.copyFrom(gridHash))
+            .build()
+        send("$baseUrl/v1/rooms/$roomId/fingerprint", printer.print(request))
     }
 
     /** POST a protojson body and return the raw response text. */

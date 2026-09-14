@@ -64,6 +64,22 @@ pub fn response_schema() -> Value {
                     },
                     "required": ["box_2d", "target", "action", "estimated_seconds"]
                 }
+            },
+            "landmarks": {
+                "type": "array",
+                "description": "Stable named anchors in the room (sink, hamper, sofa, table)",
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "label": { "type": "string" },
+                        "box_2d": {
+                            "type": "array",
+                            "items": { "type": "integer" },
+                            "description": "[ymin, xmin, ymax, xmax] normalized 0-1000"
+                        }
+                    },
+                    "required": ["label", "box_2d"]
+                }
             }
         },
         "required": ["chores"]

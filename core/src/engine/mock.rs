@@ -24,6 +24,7 @@ impl VisionInferenceEngine for MockEngine {
         let chores = mock_chores(req.room_id.as_str(), req.mode);
         Ok(AnalyzeSceneResponse {
             chores,
+            landmarks: Vec::new(),
             model: self.name().to_string(),
             latency_ms: start.elapsed().as_millis() as u32,
         })

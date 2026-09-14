@@ -11,7 +11,8 @@ use axum::{
 use lares_core::diff;
 use lares_core::domain::{
     now_unix, AnalyzeMode, AnalyzeSceneRequest, AnalyzeSceneResponse, ChoreEntity, ChoreStatus,
-    ListChoresResponse, NudgeRequest, NudgeResponse, ReferenceState, SetChoreStatusRequest,
+    FingerprintKind, LandmarkList, ListChoresResponse, ListFingerprintsResponse, NudgeRequest,
+    NudgeResponse, ReferenceState, SetChoreStatusRequest, SetFingerprintRequest,
     SetReferenceRequest,
 };
 use lares_core::engine::InferenceError;
@@ -31,6 +32,14 @@ pub fn router(state: AppState) -> Router {
         .route("/v1/chores", get(list_chores))
         .route("/v1/chores/{id}/status", patch(set_status))
         .route("/v1/nudge", post(nudge))
+        .route(
+            "/v1/rooms/{room_id}/landmarks",
+            get(get_landmarks),
+        )
+        .route(
+            "/v1/rooms/{room_id}/fingerprint",
+            get(get_fingerprints).post(set_fingerprint),
+        )
         .with_state(state)
 }
 
@@ -39,6 +48,13 @@ pub fn router(state: AppState) -> Router {
 pub struct ChoresQuery {
     /// Optional room filter.
     pub room_id: Option<String>,
+}
+
+/// Query parameters for listing fingerprints.
+#[derive(Debug, serde::Deserialize)]
+pub struct FingerprintsQuery {
+    /// Optional kind filter: latest (default), history, or clean.
+    pub kind: Option<String>,
 }
 
 /// Liveness check reporting the active engine.
@@ -61,6 +77,9 @@ async fn analyze(
     let mut response = state.engine.analyze_scene(req.clone()).await?;
     let chores = diff::postprocess(response.chores, &req.room_id);
     state.store.upsert_chores(&chores).await?;
+    if req.mode == AnalyzeMode::Discover as i32 && !response.landmarks.is_empty() {
+        state.store.upsert_landmarks(&req.room_id, &response.landmarks).await?;
+    }
     response.chores = chores;
     Ok(Json(response))
 }
@@ -137,6 +156,44 @@ async fn nudge(
     let nudge = state.policy.next_nudge(&chores, context);
     let nudges = nudge.into_iter().collect();
     Ok(Json(NudgeResponse { nudges }))
+}
+
+/// Fetch a room's current landmark set.
+async fn get_landmarks(
+    State(state): State<AppState>,
+    Path(room_id): Path<String>,
+) -> Result<Json<LandmarkList>, ApiError> {
+    let landmarks = state.store.get_landmarks(&room_id).await?;
+    Ok(Json(LandmarkList { landmarks }))
+}
+
+/// Store a room's scene fingerprint.
+async fn set_fingerprint(
+    State(state): State<AppState>,
+    Path(room_id): Path<String>,
+    Json(req): Json<SetFingerprintRequest>,
+) -> Result<StatusCode, ApiError> {
+    let kind = FingerprintKind::try_from(req.kind).unwrap_or(FingerprintKind::Latest);
+    state
+        .store
+        .save_fingerprint(&room_id, kind, &req.grid_hash)
+        .await?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+/// Fetch a room's stored fingerprints, newest first.
+async fn get_fingerprints(
+    State(state): State<AppState>,
+    Path(room_id): Path<String>,
+    Query(query): Query<FingerprintsQuery>,
+) -> Result<Json<ListFingerprintsResponse>, ApiError> {
+    let kind = match query.kind.as_deref() {
+        Some("clean") => FingerprintKind::Clean,
+        Some("history") => FingerprintKind::History,
+        _ => FingerprintKind::Latest,
+    };
+    let fingerprints = state.store.get_fingerprints(&room_id, kind).await?;
+    Ok(Json(ListFingerprintsResponse { fingerprints }))
 }
 
 /// Load the stored reference image for a room, if any.

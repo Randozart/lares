@@ -8,6 +8,7 @@ are persistent entities, not ephemeral pixels.
 Named after the Roman guardian spirits of the household.
 
 > Full plan: [`docs/PLAN.md`](docs/PLAN.md). Architecture: [`docs/architecture.md`](docs/architecture.md).
+> Live tracking & state memory design: [`docs/live-tracking.md`](docs/live-tracking.md).
 
 ## Status
 

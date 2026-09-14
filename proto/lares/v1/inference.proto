@@ -36,6 +36,8 @@ message AnalyzeSceneResponse {
   string model = 2;
   // Wall-clock inference latency in milliseconds.
   uint32 latency_ms = 3;
+  // Named spatial anchors discovered in the frame (DISCOVER mode only).
+  repeated Landmark landmarks = 4;
 }
 
 // A request to store a room's agreed target state.
@@ -56,4 +58,37 @@ message SetChoreStatusRequest {
 // A list of chores.
 message ListChoresResponse {
   repeated ChoreEntity chores = 1;
+}
+
+// A room's current named spatial anchors.
+message LandmarkList {
+  repeated Landmark landmarks = 1;
+}
+
+// Role of a stored scene fingerprint.
+enum FingerprintKind {
+  FINGERPRINT_KIND_UNSPECIFIED = 0;
+  FINGERPRINT_KIND_LATEST = 1;
+  FINGERPRINT_KIND_HISTORY = 2;
+  FINGERPRINT_KIND_CLEAN = 3;
+}
+
+// A request to store a room's scene fingerprint.
+message SetFingerprintRequest {
+  FingerprintKind kind = 1;
+  // Packed grid-edge-hash produced by the client tracker (opaque).
+  bytes grid_hash = 2;
+}
+
+// A stored scene fingerprint.
+message FingerprintRecord {
+  string room_id = 1;
+  FingerprintKind kind = 2;
+  bytes grid_hash = 3;
+  int64 captured_at_unix = 4;
+}
+
+// A list of stored fingerprints.
+message ListFingerprintsResponse {
+  repeated FingerprintRecord fingerprints = 1;
 }

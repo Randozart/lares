@@ -12,7 +12,7 @@ use serde_json::{json, Value};
 
 use crate::domain::{
     AnalyzeMode, AnalyzeSceneRequest, AnalyzeSceneResponse, BoundingBox, ChoreEntity,
-    ChoreStatus,
+    ChoreStatus, Landmark,
 };
 use crate::prompt::{
     diff_system_prompt, diff_user_prompt, discover_system_prompt, discover_user_prompt,
@@ -71,9 +71,10 @@ impl VisionInferenceEngine for GeminiEngine {
         let start = Instant::now();
         let body = self.build_body(&req);
         let raw = self.post(&body).await?;
-        let chores = parse_response(raw)?;
+        let scene = parse_response(raw)?;
         Ok(AnalyzeSceneResponse {
-            chores,
+            chores: scene.chores,
+            landmarks: scene.landmarks,
             model: self.name().to_string(),
             latency_ms: start.elapsed().as_millis() as u32,
         })
@@ -187,6 +188,14 @@ fn downscale_jpeg(jpeg: &[u8], max_dim: u32) -> Vec<u8> {
 #[derive(Debug, serde::Deserialize)]
 struct RawResponse {
     chores: Vec<RawChore>,
+    #[serde(default)]
+    landmarks: Vec<RawLandmark>,
+}
+
+/// A parsed scene: chores plus named spatial anchors.
+struct ParsedScene {
+    chores: Vec<ChoreEntity>,
+    landmarks: Vec<Landmark>,
 }
 
 /// A single chore as emitted by the model.
@@ -203,13 +212,20 @@ struct RawChore {
     subtasks: Vec<String>,
 }
 
+/// A named landmark as emitted by the model.
+#[derive(Debug, serde::Deserialize)]
+struct RawLandmark {
+    label: String,
+    box_2d: Vec<i32>,
+}
+
 /// Confidence used when the model omits the field.
 fn default_confidence() -> f32 {
     0.6
 }
 
-/// Extract chores from the raw generateContent response envelope.
-fn parse_response(body: Value) -> Result<Vec<ChoreEntity>, InferenceError> {
+/// Extract chores and landmarks from the raw generateContent response.
+fn parse_response(body: Value) -> Result<ParsedScene, InferenceError> {
     let text = body["candidates"][0]["content"]["parts"][0]["text"]
         .as_str()
         .ok_or_else(|| {
@@ -219,7 +235,10 @@ fn parse_response(body: Value) -> Result<Vec<ChoreEntity>, InferenceError> {
         })?;
     let parsed: RawResponse = serde_json::from_str(text)
         .map_err(|e| InferenceError::InvalidResponse(format!("json parse: {e}")))?;
-    Ok(parsed.chores.into_iter().filter_map(raw_to_entity).collect())
+    Ok(ParsedScene {
+        chores: parsed.chores.into_iter().filter_map(raw_to_entity).collect(),
+        landmarks: parsed.landmarks.into_iter().filter_map(raw_to_landmark).collect(),
+    })
 }
 
 /// Convert a raw model chore into a contract entity, skipping malformed rows.
@@ -244,6 +263,22 @@ fn raw_to_entity(raw: RawChore) -> Option<ChoreEntity> {
     })
 }
 
+/// Convert a raw model landmark into a contract entity, skipping malformed rows.
+fn raw_to_landmark(raw: RawLandmark) -> Option<Landmark> {
+    if raw.box_2d.len() != 4 {
+        return None;
+    }
+    Some(Landmark {
+        label: raw.label,
+        r#box: Some(BoundingBox {
+            ymin: raw.box_2d[0],
+            xmin: raw.box_2d[1],
+            ymax: raw.box_2d[2],
+            xmax: raw.box_2d[3],
+        }),
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -252,14 +287,16 @@ mod tests {
     fn parses_valid_response_envelope() {
         let body = json!({
             "candidates": [{
-                "content": { "parts": [ { "text": r#"{"chores":[{"box_2d":[100,200,300,400],"target":"socks","action":"Put socks away","estimated_seconds":20}]}"# } ] }
+                "content": { "parts": [ { "text": r#"{"chores":[{"box_2d":[100,200,300,400],"target":"socks","action":"Put socks away","estimated_seconds":20}],"landmarks":[{"label":"hamper","box_2d":[500,600,700,800]}]}"# } ] }
             }]
         });
-        let chores = parse_response(body).unwrap();
-        assert_eq!(chores.len(), 1);
-        assert_eq!(chores[0].target, "socks");
-        assert_eq!(chores[0].estimated_seconds, 20);
-        assert_eq!(chores[0].confidence, 0.6);
+        let scene = parse_response(body).unwrap();
+        assert_eq!(scene.chores.len(), 1);
+        assert_eq!(scene.chores[0].target, "socks");
+        assert_eq!(scene.chores[0].estimated_seconds, 20);
+        assert_eq!(scene.chores[0].confidence, 0.6);
+        assert_eq!(scene.landmarks.len(), 1);
+        assert_eq!(scene.landmarks[0].label, "hamper");
     }
 
     #[test]
@@ -272,10 +309,12 @@ mod tests {
     fn skips_rows_with_wrong_box_cardinality() {
         let body = json!({
             "candidates": [{
-                "content": { "parts": [ { "text": r#"{"chores":[{"box_2d":[1,2,3],"target":"x","action":"y","estimated_seconds":1}]}"# } ] }
+                "content": { "parts": [ { "text": r#"{"chores":[{"box_2d":[1,2,3],"target":"x","action":"y","estimated_seconds":1}],"landmarks":[{"label":"z","box_2d":[1,2,3]}]}"# } ] }
             }]
         });
-        assert!(parse_response(body).unwrap().is_empty());
+        let scene = parse_response(body).unwrap();
+        assert!(scene.chores.is_empty());
+        assert!(scene.landmarks.is_empty());
     }
 
     #[test]

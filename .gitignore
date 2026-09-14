@@ -12,6 +12,8 @@ android/captures/
 android/.cxx/
 # Generated working copy of the proto contract (source of truth is /proto)
 android/app/src/main/proto/
+# Cross-compiled Rust .so staged into the APK
+android/app/src/main/jniLibs/
 *.apk
 *.aab
 *.keystore

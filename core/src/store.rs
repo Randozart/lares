@@ -9,7 +9,10 @@ use std::path::Path;
 use sqlx::sqlite::{SqliteConnectOptions, SqlitePoolOptions};
 use sqlx::{Row, SqlitePool};
 
-use crate::domain::{BoundingBox, ChoreEntity, ChoreStatus, ReferenceState, now_unix};
+use crate::domain::{
+    now_unix, BoundingBox, ChoreEntity, ChoreStatus, FingerprintKind, FingerprintRecord, Landmark,
+    ReferenceState,
+};
 
 /// Errors produced by the persistence layer.
 #[derive(Debug, thiserror::Error)]
@@ -31,6 +34,46 @@ pub struct Store {
     pool: SqlitePool,
 }
 
+/// DDL for the chores table.
+const DDL_CHORES: &str = "CREATE TABLE IF NOT EXISTS chores (
+    id TEXT PRIMARY KEY,
+    room_id TEXT NOT NULL,
+    target TEXT NOT NULL,
+    action TEXT NOT NULL,
+    estimated_seconds INTEGER NOT NULL,
+    status INTEGER NOT NULL,
+    ymin INTEGER, xmin INTEGER, ymax INTEGER, xmax INTEGER,
+    confidence REAL NOT NULL,
+    subtasks TEXT NOT NULL,
+    updated_at INTEGER NOT NULL
+)";
+
+/// DDL for the room references table.
+const DDL_REFERENCES: &str = "CREATE TABLE IF NOT EXISTS room_references (
+    room_id TEXT PRIMARY KEY,
+    image_id TEXT NOT NULL,
+    description TEXT NOT NULL,
+    captured_at_unix INTEGER NOT NULL
+)";
+
+/// DDL for the room landmarks table.
+const DDL_LANDMARKS: &str = "CREATE TABLE IF NOT EXISTS room_landmarks (
+    room_id TEXT NOT NULL,
+    label TEXT NOT NULL,
+    ymin INTEGER, xmin INTEGER, ymax INTEGER, xmax INTEGER,
+    updated_at INTEGER NOT NULL,
+    PRIMARY KEY (room_id, label)
+)";
+
+/// DDL for the room fingerprints table.
+const DDL_FINGERPRINTS: &str = "CREATE TABLE IF NOT EXISTS room_fingerprints (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    room_id TEXT NOT NULL,
+    kind TEXT NOT NULL,
+    grid_hash BLOB NOT NULL,
+    captured_at_unix INTEGER NOT NULL
+)";
+
 impl Store {
     /// Open (creating if needed) the database under `data_dir`.
     pub async fn connect(data_dir: impl AsRef<Path>) -> Result<Self, StoreError> {
@@ -51,32 +94,16 @@ impl Store {
 
     /// Create tables if they do not exist.
     async fn migrate(&self) -> Result<(), StoreError> {
-        sqlx::query(
-            "CREATE TABLE IF NOT EXISTS chores (
-                id TEXT PRIMARY KEY,
-                room_id TEXT NOT NULL,
-                target TEXT NOT NULL,
-                action TEXT NOT NULL,
-                estimated_seconds INTEGER NOT NULL,
-                status INTEGER NOT NULL,
-                ymin INTEGER, xmin INTEGER, ymax INTEGER, xmax INTEGER,
-                confidence REAL NOT NULL,
-                subtasks TEXT NOT NULL,
-                updated_at INTEGER NOT NULL
-            )",
-        )
-        .execute(&self.pool)
-        .await?;
-        sqlx::query(
-            "CREATE TABLE IF NOT EXISTS room_references (
-                room_id TEXT PRIMARY KEY,
-                image_id TEXT NOT NULL,
-                description TEXT NOT NULL,
-                captured_at_unix INTEGER NOT NULL
-            )",
-        )
-        .execute(&self.pool)
-        .await?;
+        self.create_table(DDL_CHORES).await?;
+        self.create_table(DDL_REFERENCES).await?;
+        self.create_table(DDL_LANDMARKS).await?;
+        self.create_table(DDL_FINGERPRINTS).await?;
+        Ok(())
+    }
+
+    /// Execute a DDL statement against the store.
+    async fn create_table(&self, sql: &'static str) -> Result<(), StoreError> {
+        sqlx::query(sql).execute(&self.pool).await?;
         Ok(())
     }
 
@@ -195,6 +222,102 @@ impl Store {
         .await?;
         row.map(row_to_reference).transpose()
     }
+
+    /// Replace a room's landmark set within a single transaction.
+    pub async fn upsert_landmarks(
+        &self,
+        room_id: &str,
+        landmarks: &[Landmark],
+    ) -> Result<(), StoreError> {
+        let mut tx = self.pool.begin().await?;
+        sqlx::query("DELETE FROM room_landmarks WHERE room_id = ?")
+            .bind(room_id)
+            .execute(&mut *tx)
+            .await?;
+        for landmark in landmarks {
+            sqlx::query(
+                "INSERT INTO room_landmarks
+                    (room_id, label, ymin, xmin, ymax, xmax, updated_at)
+                 VALUES (?, ?, ?, ?, ?, ?, ?)",
+            )
+            .bind(room_id)
+            .bind(&landmark.label)
+            .bind(landmark.r#box.as_ref().map(|b| b.ymin as i64))
+            .bind(landmark.r#box.as_ref().map(|b| b.xmin as i64))
+            .bind(landmark.r#box.as_ref().map(|b| b.ymax as i64))
+            .bind(landmark.r#box.as_ref().map(|b| b.xmax as i64))
+            .bind(now_unix())
+            .execute(&mut *tx)
+            .await?;
+        }
+        tx.commit().await?;
+        Ok(())
+    }
+
+    /// Fetch a room's current landmark set.
+    pub async fn get_landmarks(&self, room_id: &str) -> Result<Vec<Landmark>, StoreError> {
+        let rows = sqlx::query(
+            "SELECT label, ymin, xmin, ymax, xmax FROM room_landmarks
+             WHERE room_id = ? ORDER BY label",
+        )
+        .bind(room_id)
+        .fetch_all(&self.pool)
+        .await?;
+        rows.iter().map(row_to_landmark).collect()
+    }
+
+    /// Store a scene fingerprint, capping HISTORY kind to the newest 20.
+    pub async fn save_fingerprint(
+        &self,
+        room_id: &str,
+        kind: FingerprintKind,
+        grid_hash: &[u8],
+    ) -> Result<(), StoreError> {
+        let kind_str = kind.as_str();
+        sqlx::query(
+            "INSERT INTO room_fingerprints (room_id, kind, grid_hash, captured_at_unix)
+             VALUES (?, ?, ?, ?)",
+        )
+        .bind(room_id)
+        .bind(kind_str)
+        .bind(grid_hash)
+        .bind(now_unix())
+        .execute(&self.pool)
+        .await?;
+        if kind == FingerprintKind::History {
+            sqlx::query(
+                "DELETE FROM room_fingerprints WHERE room_id = ? AND kind = ?
+                 AND id NOT IN (
+                    SELECT id FROM room_fingerprints WHERE room_id = ? AND kind = ?
+                    ORDER BY captured_at_unix DESC, id DESC LIMIT 20
+                 )",
+            )
+            .bind(room_id)
+            .bind(kind_str)
+            .bind(room_id)
+            .bind(kind_str)
+            .execute(&self.pool)
+            .await?;
+        }
+        Ok(())
+    }
+
+    /// Fetch stored fingerprints for a room and kind, newest first.
+    pub async fn get_fingerprints(
+        &self,
+        room_id: &str,
+        kind: FingerprintKind,
+    ) -> Result<Vec<FingerprintRecord>, StoreError> {
+        let rows = sqlx::query(
+            "SELECT room_id, kind, grid_hash, captured_at_unix FROM room_fingerprints
+             WHERE room_id = ? AND kind = ? ORDER BY captured_at_unix DESC",
+        )
+        .bind(room_id)
+        .bind(kind.as_str())
+        .fetch_all(&self.pool)
+        .await?;
+        rows.iter().map(row_to_fingerprint).collect()
+    }
 }
 
 /// Convert a chores table row into a contract entity.
@@ -236,6 +359,38 @@ fn row_to_reference(row: sqlx::sqlite::SqliteRow) -> Result<ReferenceState, Stor
         room_id: row.try_get("room_id")?,
         image_id: row.try_get("image_id")?,
         description: row.try_get("description")?,
+        captured_at_unix: row.try_get("captured_at_unix")?,
+    })
+}
+
+/// Convert a room_landmarks table row into a contract entity.
+fn row_to_landmark(row: &sqlx::sqlite::SqliteRow) -> Result<Landmark, StoreError> {
+    let ymin = row.try_get::<Option<i64>, _>("ymin")?;
+    let xmin = row.try_get::<Option<i64>, _>("xmin")?;
+    let ymax = row.try_get::<Option<i64>, _>("ymax")?;
+    let xmax = row.try_get::<Option<i64>, _>("xmax")?;
+    let r#box = match (ymin, xmin, ymax, xmax) {
+        (Some(a), Some(b), Some(c), Some(d)) => Some(BoundingBox {
+            ymin: a as i32,
+            xmin: b as i32,
+            ymax: c as i32,
+            xmax: d as i32,
+        }),
+        _ => None,
+    };
+    Ok(Landmark {
+        label: row.try_get("label")?,
+        r#box,
+    })
+}
+
+/// Convert a room_fingerprints table row into a contract entity.
+fn row_to_fingerprint(row: &sqlx::sqlite::SqliteRow) -> Result<FingerprintRecord, StoreError> {
+    let kind_str: String = row.try_get("kind")?;
+    Ok(FingerprintRecord {
+        room_id: row.try_get("room_id")?,
+        kind: FingerprintKind::parse(&kind_str) as i32,
+        grid_hash: row.try_get("grid_hash")?,
         captured_at_unix: row.try_get("captured_at_unix")?,
     })
 }
@@ -312,6 +467,43 @@ mod tests {
         let loaded = store.get_reference("kitchen").await.unwrap();
         assert_eq!(loaded.unwrap().description, "counters clear, dishes empty");
         assert!(store.get_reference("bathroom").await.unwrap().is_none());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A sample landmark for persistence tests.
+    fn sample_landmark(label: &str) -> Landmark {
+        Landmark {
+            label: label.to_string(),
+            r#box: Some(BoundingBox { ymin: 100, xmin: 200, ymax: 400, xmax: 600 }),
+        }
+    }
+
+    #[tokio::test]
+    async fn landmarks_round_trip_and_replace() {
+        let (store, dir) = temp_store().await;
+        store.upsert_landmarks("kitchen", &[sample_landmark("sink"), sample_landmark("hamper")]).await.unwrap();
+        let loaded = store.get_landmarks("kitchen").await.unwrap();
+        assert_eq!(loaded.len(), 2);
+        assert_eq!(loaded[0].label, "hamper");
+        store.upsert_landmarks("kitchen", &[sample_landmark("sink")]).await.unwrap();
+        let reloaded = store.get_landmarks("kitchen").await.unwrap();
+        assert_eq!(reloaded.len(), 1);
+        assert_eq!(reloaded[0].label, "sink");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn fingerprints_store_and_retrieve_by_kind() {
+        let (store, dir) = temp_store().await;
+        store.save_fingerprint("kitchen", FingerprintKind::Latest, &[1, 2, 3]).await.unwrap();
+        store.save_fingerprint("kitchen", FingerprintKind::Clean, &[4, 5, 6]).await.unwrap();
+        let latest = store.get_fingerprints("kitchen", FingerprintKind::Latest).await.unwrap();
+        assert_eq!(latest.len(), 1);
+        assert_eq!(latest[0].grid_hash, vec![1, 2, 3]);
+        let clean = store.get_fingerprints("kitchen", FingerprintKind::Clean).await.unwrap();
+        assert_eq!(clean.len(), 1);
+        let all_history = store.get_fingerprints("kitchen", FingerprintKind::History).await.unwrap();
+        assert!(all_history.is_empty());
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

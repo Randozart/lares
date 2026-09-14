@@ -8,9 +8,11 @@ import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.aspectRatio
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
@@ -28,6 +30,7 @@ import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -42,8 +45,9 @@ import androidx.lifecycle.viewmodel.compose.viewModel
 import dev.randozart.lares.capture.CameraController
 import dev.randozart.lares.proto.AnalyzeMode
 import dev.randozart.lares.proto.ChoreStatus
+import dev.randozart.lares.sensing.SettleDetector
 import dev.randozart.lares.ui.CameraPreview
-import dev.randozart.lares.ui.ChoreOverlay
+import dev.randozart.lares.ui.LiveOverlay
 
 /** Entry point: owns the camera controller and hosts the Compose UI. */
 class MainActivity : ComponentActivity() {
@@ -56,9 +60,14 @@ class MainActivity : ComponentActivity() {
             LaresApp(cameraController)
         }
     }
+
+    override fun onDestroy() {
+        super.onDestroy()
+        cameraController.shutdown()
+    }
 }
 
-/** Top-level UI for the fast loop. */
+/** Top-level UI for the live fast loop. */
 @Composable
 fun LaresApp(controller: CameraController) {
     val viewModel: MainViewModel = viewModel()
@@ -79,6 +88,24 @@ fun LaresApp(controller: CameraController) {
         }
     }
 
+    // Feed every analysis frame into the tracker.
+    LaunchedEffect(controller) {
+        controller.analysisCallback = { viewModel.onAnalysisFrame(it) }
+    }
+
+    // Auto-scan on pan-settle, gated by the cost guards.
+    val settleDetector = remember {
+        SettleDetector(context) {
+            if (viewModel.shouldAutoScan()) {
+                viewModel.captureAndAnalyze(controller, bypassGates = false)
+            }
+        }
+    }
+    DisposableEffect(Unit) {
+        settleDetector.start()
+        onDispose { settleDetector.stop() }
+    }
+
     Scaffold(topBar = {
         Row(
             modifier = Modifier.fillMaxWidth().padding(16.dp),
@@ -91,7 +118,7 @@ fun LaresApp(controller: CameraController) {
                 style = MaterialTheme.typography.bodySmall,
                 modifier = Modifier.weight(1f),
             )
-            if (viewModel.busy) {
+            if (viewModel.busy || viewModel.scanning) {
                 CircularProgressIndicator(modifier = Modifier.height(20.dp).width(20.dp))
             }
         }
@@ -106,42 +133,37 @@ fun LaresApp(controller: CameraController) {
         ) {
             SettingsPanel(viewModel)
 
-            if (viewModel.frozen == null) {
+            Box(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .aspectRatio(9f / 16f),
+            ) {
                 CameraPreview(
                     controller = controller,
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .height(420.dp),
+                    modifier = Modifier.matchParentSize(),
                 )
-                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                    Button(
-                        onClick = { viewModel.captureAndAnalyze(controller) },
-                        enabled = hasCamera && !viewModel.busy,
-                        modifier = Modifier.weight(1f),
-                    ) {
-                        Text("Capture & Analyze")
-                    }
-                    OutlinedButton(
-                        onClick = { viewModel.captureReference(controller) },
-                        enabled = hasCamera && !viewModel.busy,
-                        modifier = Modifier.weight(1f),
-                    ) {
-                        Text("Set Reference")
-                    }
-                }
-            } else {
-                viewModel.frozen?.let { bitmap ->
-                    ChoreOverlay(
-                        bitmap = bitmap,
-                        chores = viewModel.chores,
-                        modifier = Modifier.fillMaxWidth(),
-                    )
+                LiveOverlay(
+                    boxes = viewModel.trackedBoxes,
+                    choresById = viewModel.choresById,
+                    landmarks = viewModel.landmarks,
+                    modifier = Modifier.matchParentSize(),
+                )
+            }
+
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                Button(
+                    onClick = { viewModel.captureAndAnalyze(controller, bypassGates = true) },
+                    enabled = hasCamera && !viewModel.busy,
+                    modifier = Modifier.weight(1f),
+                ) {
+                    Text("Scan")
                 }
                 OutlinedButton(
-                    onClick = { viewModel.resume() },
-                    modifier = Modifier.fillMaxWidth(),
+                    onClick = { viewModel.captureReference(controller) },
+                    enabled = hasCamera && !viewModel.busy,
+                    modifier = Modifier.weight(1f),
                 ) {
-                    Text("Resume live preview")
+                    Text("Set Reference")
                 }
             }
 
@@ -151,7 +173,7 @@ fun LaresApp(controller: CameraController) {
                 onClick = { viewModel.refreshChores() },
                 modifier = Modifier.fillMaxWidth(),
             ) {
-                Text("Refresh chores")
+                Text("Refresh")
             }
         }
     }
@@ -201,7 +223,10 @@ private fun ChoreList(viewModel: MainViewModel) {
     Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
         Text("Chores", style = MaterialTheme.typography.titleMedium)
         if (viewModel.chores.isEmpty()) {
-            Text("No chores yet. Capture a frame to discover them.", style = MaterialTheme.typography.bodySmall)
+            Text(
+                "No chores yet. Hold the camera still to auto-scan, or tap Scan.",
+                style = MaterialTheme.typography.bodySmall,
+            )
         }
         viewModel.chores.forEach { chore ->
             ChoreCard(chore) { status ->
@@ -232,7 +257,11 @@ private fun ChoreCard(chore: dev.randozart.lares.proto.ChoreEntity, onToggle: (C
                     style = MaterialTheme.typography.bodySmall,
                 )
             }
-            OutlinedButton(onClick = { onToggle(if (done) ChoreStatus.CHORE_STATUS_DISCOVERED else ChoreStatus.CHORE_STATUS_DONE) }) {
+            OutlinedButton(
+                onClick = {
+                    onToggle(if (done) ChoreStatus.CHORE_STATUS_DISCOVERED else ChoreStatus.CHORE_STATUS_DONE)
+                },
+            ) {
                 Text(if (done) "Restore" else "Done")
             }
         }

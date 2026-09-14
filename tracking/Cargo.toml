@@ -1,0 +1,18 @@
+[package]
+name = "lares-tracking"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "On-device visual tracking, scene fingerprints, and landmark patches for Lares. Exposed to Android via UniFFI."
+
+[lib]
+crate-type = ["cdylib", "lib"]
+
+[dependencies]
+uniffi = { version = "0.32", features = ["cli"] }
+
+# A bindgen shim pinned to the same uniffi version as this crate, so `cargo run
+# --bin uniffi-bindgen` always produces bindings matching the scaffolding.
+[[bin]]
+name = "uniffi-bindgen"
+path = "bin/uniffi-bindgen.rs"

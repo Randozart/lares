@@ -66,6 +66,15 @@ message ChoreEntity {
   optional float energy_cost = 15;
 }
 
+// A persistent, named spatial anchor in a room (e.g. sink basin, hamper).
+// Returned in DISCOVER mode so the client can remember where things live.
+message Landmark {
+  // Human label, e.g. "sink basin" or "laundry hamper".
+  string label = 1;
+  // Normalized location of the landmark in the frame.
+  BoundingBox box = 2;
+}
+
 // The agreed target state ("definition of done") for a room.
 message ReferenceState {
   string room_id = 1;
