@@ -22,7 +22,13 @@ use crate::prompt::{
 use super::{InferenceError, VisionInferenceEngine};
 
 /// Default Gemini model identifier, overridable via `LARES_MODEL`.
-pub const DEFAULT_MODEL: &str = "gemini-2.5-flash";
+///
+/// Chore detection is a lightweight task; the full flash model is overkill.
+/// Lite cuts cost and latency with no measurable accuracy loss for this use.
+pub const DEFAULT_MODEL: &str = "gemini-2.5-flash-lite";
+
+/// Longest-side pixel limit for images sent to the model.
+const MAX_INPUT_DIM: u32 = 1280;
 
 /// Base URL for the Gemini REST API.
 const BASE_URL: &str = "https://generativelanguage.googleapis.com/v1beta";
@@ -86,25 +92,23 @@ impl GeminiEngine {
             true => (diff_system_prompt(), diff_user_prompt()),
             false => (discover_system_prompt(), discover_user_prompt()),
         };
+        let frame = downscale_jpeg(&req.frame_jpeg, MAX_INPUT_DIM);
         let mut parts = Vec::new();
         if req.mode == AnalyzeMode::Diff as i32 {
             if let Some(reference) = req.reference_jpeg.as_deref() {
                 parts.push(json!({ "text": "Image A (agreed target state):" }));
-                parts.push(inline_image(reference));
+                parts.push(inline_image(&downscale_jpeg(reference, MAX_INPUT_DIM)));
             }
             parts.push(json!({ "text": "Image B (current frame):" }));
         } else {
             parts.push(json!({ "text": user }));
         }
-        parts.push(inline_image(&req.frame_jpeg));
+        parts.push(inline_image(&frame));
 
         json!({
             "system_instruction": { "parts": [ { "text": system } ] },
             "contents": [ { "role": "user", "parts": parts } ],
-            "generationConfig": {
-                "responseMimeType": "application/json",
-                "responseSchema": response_schema()
-            }
+            "generationConfig": generation_config(&self.model)
         })
     }
 
@@ -137,6 +141,46 @@ impl GeminiEngine {
 fn inline_image(jpeg: &[u8]) -> Value {
     let data = base64::engine::general_purpose::STANDARD.encode(jpeg);
     json!({ "inline_data": { "mime_type": "image/jpeg", "data": data } })
+}
+
+/// Build the generation configuration, disabling model "thinking".
+///
+/// Thinking models (the 2.5 family) add seconds of hidden inference before the
+/// JSON payload. Chores do not need reasoning, so it is turned off.
+fn generation_config(model: &str) -> Value {
+    let mut config = json!({
+        "responseMimeType": "application/json",
+        "responseSchema": response_schema(),
+        "maxOutputTokens": 4096
+    });
+    if model.contains("2.5") {
+        config["thinkingConfig"] = json!({ "thinkingBudget": 0 });
+    }
+    config
+}
+
+/// Downscale a JPEG to at most `max_dim` on its longest side.
+///
+/// Returns the original bytes if decoding or re-encoding fails, so a bad frame
+/// degrades to the previous behavior instead of erroring out.
+fn downscale_jpeg(jpeg: &[u8], max_dim: u32) -> Vec<u8> {
+    let Ok(source) = image::load_from_memory_with_format(jpeg, image::ImageFormat::Jpeg) else {
+        return jpeg.to_vec();
+    };
+    if source.width().max(source.height()) <= max_dim {
+        return jpeg.to_vec();
+    }
+    let scaled = source.resize(
+        max_dim,
+        max_dim,
+        image::imageops::FilterType::Triangle,
+    );
+    let mut out = Vec::new();
+    let encoder = image::codecs::jpeg::JpegEncoder::new_with_quality(&mut out, 85);
+    if scaled.write_with_encoder(encoder).is_err() {
+        return jpeg.to_vec();
+    }
+    out
 }
 
 /// The envelope the model is expected to return.
@@ -250,5 +294,40 @@ mod tests {
             body["generationConfig"]["responseMimeType"],
             "application/json"
         );
+    }
+
+    #[test]
+    fn thinking_disabled_for_2_5_models() {
+        assert_eq!(
+            generation_config("gemini-2.5-flash")["thinkingConfig"]["thinkingBudget"],
+            0
+        );
+        assert_eq!(
+            generation_config(DEFAULT_MODEL)["thinkingConfig"]["thinkingBudget"],
+            0
+        );
+        assert!(generation_config("gemini-2.0-flash").get("thinkingConfig").is_none());
+    }
+
+    #[test]
+    fn downscales_oversized_jpeg() {
+        let source = image::RgbImage::from_pixel(2000, 1600, image::Rgb([128u8, 64, 32]));
+        let mut jpeg = Vec::new();
+        let encoder = image::codecs::jpeg::JpegEncoder::new_with_quality(&mut jpeg, 90);
+        source.write_with_encoder(encoder).unwrap();
+        let out = downscale_jpeg(&jpeg, 1280);
+        assert!(out.len() < jpeg.len());
+        let decoded = image::load_from_memory_with_format(&out, image::ImageFormat::Jpeg).unwrap();
+        assert!(decoded.width() <= 1280);
+        assert!(decoded.height() <= 1280);
+    }
+
+    #[test]
+    fn small_jpeg_passes_through_unchanged() {
+        let source = image::RgbImage::from_pixel(640, 480, image::Rgb([10u8, 20, 30]));
+        let mut jpeg = Vec::new();
+        let encoder = image::codecs::jpeg::JpegEncoder::new_with_quality(&mut jpeg, 90);
+        source.write_with_encoder(encoder).unwrap();
+        assert_eq!(downscale_jpeg(&jpeg, 1280), jpeg);
     }
 }
