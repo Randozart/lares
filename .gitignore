@@ -1,0 +1,38 @@
+# Rust
+/target
+**/target
+
+# Android / Gradle
+android/.gradle/
+android/build/
+android/app/build/
+android/local.properties
+android/.idea/
+android/captures/
+android/.cxx/
+# Generated working copy of the proto contract (source of truth is /proto)
+android/app/src/main/proto/
+*.apk
+*.aab
+*.keystore
+
+# Python
+__pycache__/
+*.pyc
+
+# Env / secrets
+.env
+*.env.local
+
+# Local data (sqlite, captured frames, reference images)
+/data/
+*.db
+*.db-shm
+*.db-wal
+
+# Editor
+.vscode/
+*.swp
+
+# Praetor local state (machine-written, not committed)
+.praetor/shadow-results.json

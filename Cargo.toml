@@ -1,0 +1,38 @@
+[workspace]
+resolver = "2"
+members = ["core", "server"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+authors = ["randozart"]
+repository = "https://github.com/randozart/lares"
+
+[workspace.dependencies]
+# protobuf
+prost = "0.14"
+prost-types = "0.14"
+pbjson = "0.9"
+prost-build = "0.14"
+pbjson-build = "0.9"
+
+# async / web
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "signal", "fs"] }
+axum = "0.8"
+tower-http = { version = "0.6", features = ["trace"] }
+reqwest = { version = "0.13", default-features = false, features = ["json", "query", "rustls", "webpki-roots"] }
+
+# domain / util
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+async-trait = "0.1"
+thiserror = "2"
+uuid = { version = "1", features = ["v4"] }
+base64 = "0.22"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+sqlx = { version = "0.9", default-features = false, features = ["runtime-tokio", "sqlite", "macros"] }
+
+# local crate versions
+lares-core = { path = "core", version = "0.1.0" }

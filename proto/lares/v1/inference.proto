@@ -1,0 +1,59 @@
+// Inference contract: the slow-loop request/response between the client and the
+// Rust core.
+syntax = "proto3";
+
+package lares.v1;
+
+option java_package = "dev.randozart.lares.proto";
+option java_multiple_files = true;
+option java_outer_classname = "InferenceProto";
+
+import "lares/v1/chore.proto";
+
+// How a frame should be analyzed.
+enum AnalyzeMode {
+  ANALYZE_MODE_UNSPECIFIED = 0;
+  // Find all actionable chores in the frame.
+  ANALYZE_MODE_DISCOVER = 1;
+  // Compare the frame against the room's reference state; emit only deltas.
+  ANALYZE_MODE_DIFF = 2;
+}
+
+// A request to analyze one captured keyframe.
+message AnalyzeSceneRequest {
+  string room_id = 1;
+  // JPEG bytes of the captured frame.
+  bytes frame_jpeg = 2;
+  // Optional agreed target state. Required for ANALYZE_MODE_DIFF.
+  optional bytes reference_jpeg = 3;
+  AnalyzeMode mode = 4;
+}
+
+// The result of analyzing a frame.
+message AnalyzeSceneResponse {
+  repeated ChoreEntity chores = 1;
+  // Identifier of the engine/model that produced the result.
+  string model = 2;
+  // Wall-clock inference latency in milliseconds.
+  uint32 latency_ms = 3;
+}
+
+// A request to store a room's agreed target state.
+message SetReferenceRequest {
+  string room_id = 1;
+  // Human description of the agreed state.
+  string description = 2;
+  // JPEG bytes of the reference image.
+  bytes frame_jpeg = 3;
+}
+
+// A request to transition a chore's lifecycle state.
+message SetChoreStatusRequest {
+  string chore_id = 1;
+  ChoreStatus status = 2;
+}
+
+// A list of chores.
+message ListChoresResponse {
+  repeated ChoreEntity chores = 1;
+}

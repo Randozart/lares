@@ -1,0 +1,40 @@
+// Proactive nudge contract (Phase G seam).
+//
+// The MVP wires NoopPolicy and never emits nudges. These types exist so the
+// reminder feature can be added without touching the chore contract.
+syntax = "proto3";
+
+package lares.v1;
+
+option java_package = "dev.randozart.lares.proto";
+option java_multiple_files = true;
+option java_outer_classname = "NudgeProto";
+
+// A request to surface a chore to the user.
+message Nudge {
+  string chore_id = 1;
+  // Why the chore is being surfaced, e.g. "idle_quick_win".
+  string reason = 2;
+  // Unix seconds the nudge was produced.
+  int64 created_at_unix = 3;
+}
+
+// Signals describing whether the user is idle and where. The concrete detector
+// (screen idle, time of day, geofence) is decided in Phase G.
+message IdleContext {
+  bool screen_on = 1;
+  uint32 seconds_idle = 2;
+  // Local hour in the range 0..=23.
+  uint32 hour_local = 3;
+  bool at_home = 4;
+}
+
+// Input to a reminder policy evaluation.
+message NudgeRequest {
+  IdleContext context = 1;
+}
+
+// Output of a reminder policy evaluation.
+message NudgeResponse {
+  repeated Nudge nudges = 1;
+}
