@@ -93,6 +93,7 @@ mod tests {
             frame_jpeg: vec![1, 2, 3],
             reference_jpeg: None,
             mode: AnalyzeMode::Discover.into(),
+            sweep_jpegs: Vec::new(),
         };
         let resp = engine.analyze_scene(req).await.unwrap();
         assert_eq!(resp.chores.len(), 2);
@@ -107,6 +108,7 @@ mod tests {
             frame_jpeg: vec![1, 2, 3],
             reference_jpeg: Some(vec![4, 5, 6]),
             mode: AnalyzeMode::Diff.into(),
+            sweep_jpegs: Vec::new(),
         };
         let resp = engine.analyze_scene(req).await.unwrap();
         assert_eq!(resp.chores.len(), 1);

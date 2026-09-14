@@ -41,7 +41,13 @@ async fn main() {
         data_dir: std::path::PathBuf::from(data_dir),
     };
 
-    let app = routes::router(app_state);
+    let mut app = routes::router(app_state);
+    if let Ok(apk_path) = std::env::var("LARES_APK_PATH") {
+        if std::path::Path::new(&apk_path).is_file() {
+            app = app.route_service("/apk", tower_http::services::ServeFile::new(apk_path.clone()));
+            tracing::info!("serving APK at /apk: {apk_path}");
+        }
+    }
     let listener = match tokio::net::TcpListener::bind(&bind).await {
         Ok(listener) => listener,
         Err(err) => {
@@ -58,9 +64,11 @@ fn build_engine() -> Box<dyn VisionInferenceEngine> {
     let kind = std::env::var("LARES_ENGINE").unwrap_or_else(|_| "mock".to_string());
     match kind.as_str() {
         "gemini" => {
-            let api_key = std::env::var("GEMINI_API_KEY").unwrap_or_default();
+            let api_key = resolve_gemini_key();
             if api_key.is_empty() {
-                eprintln!("GEMINI_API_KEY is required for LARES_ENGINE=gemini");
+                eprintln!(
+                    "GEMINI_API_KEY is required for LARES_ENGINE=gemini (or set GEMINI_API_KEY_FILE)"
+                );
                 std::process::exit(1);
             }
             let model = std::env::var("LARES_MODEL")
@@ -74,4 +82,23 @@ fn build_engine() -> Box<dyn VisionInferenceEngine> {
         }
         _ => Box::new(MockEngine),
     }
+}
+
+/// Resolve the Gemini API key from the environment or a key file.
+///
+/// Prefers `GEMINI_API_KEY`; falls back to `GEMINI_API_KEY_FILE` (a file whose
+/// first non-empty line is the key), which is convenient for service managers
+/// and non-POSIX shells.
+fn resolve_gemini_key() -> String {
+    let from_env = std::env::var("GEMINI_API_KEY").unwrap_or_default();
+    if !from_env.is_empty() {
+        return from_env;
+    }
+    let path = std::env::var("GEMINI_API_KEY_FILE").unwrap_or_default();
+    if path.is_empty() {
+        return String::new();
+    }
+    std::fs::read_to_string(&path)
+        .map(|contents| contents.trim().to_string())
+        .unwrap_or_default()
 }

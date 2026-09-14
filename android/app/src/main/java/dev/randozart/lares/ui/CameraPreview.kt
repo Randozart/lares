@@ -22,7 +22,7 @@ fun CameraPreview(
         factory = { ctx ->
             PreviewView(ctx).also {
                 controller.previewView = it
-                it.scaleType = PreviewView.ScaleType.FIT_CENTER
+                it.scaleType = PreviewView.ScaleType.FILL_CENTER
             }
         },
         modifier = modifier,

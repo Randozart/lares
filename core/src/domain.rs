@@ -12,7 +12,7 @@ pub const BOX_MIN: i32 = 0;
 /// Upper bound of normalized box coordinates.
 pub const BOX_MAX: i32 = 1000;
 /// Minimum confidence for a chore to survive post-processing.
-pub const DEFAULT_MIN_CONFIDENCE: f32 = 0.25;
+pub const DEFAULT_MIN_CONFIDENCE: f32 = 0.45;
 
 impl FingerprintKind {
     /// Persisted string form of the fingerprint kind.

@@ -1,7 +1,7 @@
 //! HTTP routes exposing the Lares core over protojson.
 
 use axum::{
-    extract::{Path, Query, State},
+    extract::{DefaultBodyLimit, Path, Query, State},
     http::StatusCode,
     response::{IntoResponse, Response},
     routing::{get, patch, post},
@@ -40,6 +40,9 @@ pub fn router(state: AppState) -> Router {
             "/v1/rooms/{room_id}/fingerprint",
             get(get_fingerprints).post(set_fingerprint),
         )
+        // Phone captures are multi-megabyte JPEGs; the default 2MB body limit
+        // rejects them. 32MB headroom covers even large reference frames.
+        .layer(DefaultBodyLimit::max(32 * 1024 * 1024))
         .with_state(state)
 }
 

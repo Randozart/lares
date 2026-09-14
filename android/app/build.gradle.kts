@@ -151,9 +151,9 @@ dependencies {
     implementation("com.google.protobuf:protobuf-java:4.28.2")
     implementation("com.google.protobuf:protobuf-java-util:4.28.2")
 
-    // UniFFI-generated Kotlin bindings for lares-tracking use JNA.
-    implementation("net.java.dev.jna:jna:5.16.0")
-    implementation("net.java.dev.jna:jna-platform:5.16.0")
+    // UniFFI-generated Kotlin bindings for lares-tracking use JNA. The @aar
+// artifact bundles the Android libjnidispatch.so natives.
+    implementation("net.java.dev.jna:jna:5.16.0@aar")
 
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.9.0")
 

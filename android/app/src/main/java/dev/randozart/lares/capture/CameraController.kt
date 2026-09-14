@@ -1,15 +1,13 @@
 package dev.randozart.lares.capture
 
 import android.content.Context
-import android.util.Size
+import android.util.Log
 import androidx.camera.core.CameraSelector
 import androidx.camera.core.ImageAnalysis
 import androidx.camera.core.ImageCapture
 import androidx.camera.core.ImageCaptureException
 import androidx.camera.core.ImageProxy
 import androidx.camera.core.Preview
-import androidx.camera.core.resolutionselector.ResolutionSelector
-import androidx.camera.core.resolutionselector.ResolutionStrategy
 import androidx.camera.lifecycle.ProcessCameraProvider
 import androidx.camera.view.PreviewView
 import androidx.core.content.ContextCompat
@@ -32,8 +30,8 @@ class CameraController(private val context: Context) {
     /** Called with each analysis frame on a background thread. */
     var analysisCallback: ((ImageProxy) -> Unit)? = null
 
-    /** Shared analysis resolution (matches capture resolution). */
-    private val analysisSize = Size(1280, 720)
+    /** Frames delivered by the analysis use-case, for debugging. */
+    private var analysisFrames = 0
 
     /** Bind the back camera to the given lifecycle owner. */
     fun bind(lifecycleOwner: LifecycleOwner) {
@@ -45,21 +43,27 @@ class CameraController(private val context: Context) {
                 .build()
                 .also { it.setSurfaceProvider(previewView.surfaceProvider) }
 
-            val resolution = ResolutionSelector.Builder()
-                .setResolutionStrategy(ResolutionStrategy(analysisSize, ResolutionStrategy.FALLBACK_RULE_CLOSEST_LOWER_THEN_HIGHER))
-                .build()
+            // No forced resolution: forcing capture+analysis to the same size
+            // breaks the stream combo on some devices (e.g. analysis resolves
+            // to 960x960, capture to 2448x2448) and the session never starts.
             imageCapture = ImageCapture.Builder()
-                .setResolutionSelector(resolution)
                 .setTargetRotation(previewView.display.rotation)
                 .setCaptureMode(ImageCapture.CAPTURE_MODE_MINIMIZE_LATENCY)
                 .build()
             val analysis = ImageAnalysis.Builder()
-                .setResolutionSelector(resolution)
                 .setTargetRotation(previewView.display.rotation)
                 .setBackpressureStrategy(ImageAnalysis.STRATEGY_KEEP_ONLY_LATEST)
                 .build()
                 .also {
                     it.setAnalyzer(analysisExecutor) { proxy ->
+                        analysisFrames += 1
+                        if (analysisFrames <= 5 || analysisFrames % 60 == 0) {
+                            Log.d(
+                                "LaresCam",
+                                "frame #$analysisFrames ${proxy.width}x${proxy.height} " +
+                                    "rot=${proxy.imageInfo.rotationDegrees} cb=${analysisCallback != null}",
+                            )
+                        }
                         analysisCallback?.invoke(proxy)
                     }
                 }
@@ -72,6 +76,7 @@ class CameraController(private val context: Context) {
                 imageCapture,
                 analysis,
             )
+            Log.d("LaresCam", "bound preview+capture+analysis (default resolutions)")
         }, ContextCompat.getMainExecutor(context))
     }
 

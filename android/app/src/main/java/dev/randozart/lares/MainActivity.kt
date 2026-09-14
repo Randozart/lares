@@ -7,28 +7,37 @@ import androidx.activity.ComponentActivity
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
-import androidx.compose.foundation.layout.aspectRatio
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.width
-import androidx.compose.foundation.rememberScrollState
-import androidx.compose.foundation.verticalScroll
+import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.items
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.Settings
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.Card
 import androidx.compose.material3.CircularProgressIndicator
+import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.FilterChip
+import androidx.compose.material3.Icon
+import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.ModalBottomSheet
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
+import androidx.compose.material3.rememberModalBottomSheetState
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
@@ -38,16 +47,19 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
 import androidx.core.content.ContextCompat
 import androidx.lifecycle.viewmodel.compose.viewModel
 import dev.randozart.lares.capture.CameraController
 import dev.randozart.lares.proto.AnalyzeMode
+import dev.randozart.lares.proto.ChoreEntity
 import dev.randozart.lares.proto.ChoreStatus
 import dev.randozart.lares.sensing.SettleDetector
 import dev.randozart.lares.ui.CameraPreview
 import dev.randozart.lares.ui.LiveOverlay
+import kotlinx.coroutines.delay
 
 /** Entry point: owns the camera controller and hosts the Compose UI. */
 class MainActivity : ComponentActivity() {
@@ -67,11 +79,16 @@ class MainActivity : ComponentActivity() {
     }
 }
 
-/** Top-level UI for the live fast loop. */
+/** Full-bleed immersive UI: live preview fills the screen, controls overlay it. */
+@OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun LaresApp(controller: CameraController) {
     val viewModel: MainViewModel = viewModel()
     val context = LocalContext.current
+    var howChore by remember { mutableStateOf<ChoreEntity?>(null) }
+    var showSettings by remember { mutableStateOf(false) }
+    var showChores by remember { mutableStateOf(false) }
+    val sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
     var hasCamera by remember {
         mutableStateOf(
             ContextCompat.checkSelfPermission(context, Manifest.permission.CAMERA) ==
@@ -88,12 +105,10 @@ fun LaresApp(controller: CameraController) {
         }
     }
 
-    // Feed every analysis frame into the tracker.
     LaunchedEffect(controller) {
         controller.analysisCallback = { viewModel.onAnalysisFrame(it) }
     }
 
-    // Auto-scan on pan-settle, gated by the cost guards.
     val settleDetector = remember {
         SettleDetector(context) {
             if (viewModel.shouldAutoScan()) {
@@ -106,51 +121,95 @@ fun LaresApp(controller: CameraController) {
         onDispose { settleDetector.stop() }
     }
 
-    Scaffold(topBar = {
-        Row(
-            modifier = Modifier.fillMaxWidth().padding(16.dp),
-            verticalAlignment = Alignment.CenterVertically,
-        ) {
-            Text("Lares", style = MaterialTheme.typography.titleLarge)
-            Spacer(Modifier.width(12.dp))
-            Text(
-                viewModel.statusLine,
-                style = MaterialTheme.typography.bodySmall,
-                modifier = Modifier.weight(1f),
-            )
-            if (viewModel.busy || viewModel.scanning) {
-                CircularProgressIndicator(modifier = Modifier.height(20.dp).width(20.dp))
-            }
+    // Sweep: capture a keyframe every 1.2s while sweeping.
+    LaunchedEffect(viewModel.sweeping) {
+        while (viewModel.sweeping) {
+            viewModel.captureSweepFrame(controller)
+            delay(1200)
         }
-    }) { padding ->
+    }
+
+    Box(Modifier.fillMaxSize().background(Color.Black)) {
+        CameraPreview(controller = controller, modifier = Modifier.matchParentSize())
+        LiveOverlay(
+            boxes = viewModel.trackedBoxes,
+            choresById = viewModel.choresById,
+            landmarks = viewModel.landmarks,
+            modifier = Modifier.matchParentSize(),
+        )
+
+        // Top overlay: title + status + settings.
         Column(
             modifier = Modifier
-                .fillMaxSize()
-                .padding(padding)
-                .padding(horizontal = 16.dp)
-                .verticalScroll(rememberScrollState()),
-            verticalArrangement = Arrangement.spacedBy(12.dp),
+                .align(Alignment.TopCenter)
+                .fillMaxWidth()
+                .padding(10.dp),
+            verticalArrangement = Arrangement.spacedBy(8.dp),
         ) {
-            SettingsPanel(viewModel)
-
-            Box(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .aspectRatio(9f / 16f),
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                verticalAlignment = Alignment.CenterVertically,
             ) {
-                CameraPreview(
-                    controller = controller,
-                    modifier = Modifier.matchParentSize(),
+                Text("Lares", style = MaterialTheme.typography.titleLarge, color = Color.White)
+                Spacer(Modifier.width(10.dp))
+                Text(
+                    viewModel.statusLine,
+                    style = MaterialTheme.typography.bodySmall,
+                    color = Color.White.copy(alpha = 0.85f),
+                    modifier = Modifier.weight(1f),
                 )
-                LiveOverlay(
-                    boxes = viewModel.trackedBoxes,
-                    choresById = viewModel.choresById,
-                    landmarks = viewModel.landmarks,
-                    modifier = Modifier.matchParentSize(),
+                if (viewModel.busy || viewModel.scanning || viewModel.sweeping) {
+                    CircularProgressIndicator(modifier = Modifier.height(18.dp).width(18.dp))
+                }
+                IconButton(onClick = { showSettings = true }) {
+                    Icon(Icons.Default.Settings, contentDescription = "Settings", tint = Color.White)
+                }
+            }
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                Text(
+                    viewModel.roomId,
+                    style = MaterialTheme.typography.labelLarge,
+                    color = Color.White,
+                    modifier = Modifier
+                        .background(Color.Black.copy(alpha = 0.4f))
+                        .padding(horizontal = 10.dp, vertical = 4.dp),
+                )
+                FilterChip(
+                    selected = viewModel.mode == AnalyzeMode.ANALYZE_MODE_DISCOVER,
+                    onClick = { viewModel.mode = AnalyzeMode.ANALYZE_MODE_DISCOVER },
+                    label = { Text("Discover") },
+                )
+                FilterChip(
+                    selected = viewModel.mode == AnalyzeMode.ANALYZE_MODE_DIFF,
+                    onClick = { viewModel.mode = AnalyzeMode.ANALYZE_MODE_DIFF },
+                    label = { Text("Diff") },
                 )
             }
+        }
 
-            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+        // Bottom overlay: sweep / scan / reference + chores sheet.
+        Column(
+            modifier = Modifier
+                .align(Alignment.BottomCenter)
+                .fillMaxWidth()
+                .padding(16.dp),
+            verticalArrangement = Arrangement.spacedBy(8.dp),
+            horizontalAlignment = Alignment.CenterHorizontally,
+        ) {
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+            ) {
+                Button(
+                    onClick = {
+                        if (viewModel.sweeping) viewModel.endSweep()
+                        else viewModel.startSweep()
+                    },
+                    enabled = hasCamera && !viewModel.busy,
+                    modifier = Modifier.weight(1f),
+                ) {
+                    Text(if (viewModel.sweeping) "Stop" else "Sweep")
+                }
                 Button(
                     onClick = { viewModel.captureAndAnalyze(controller, bypassGates = true) },
                     enabled = hasCamera && !viewModel.busy,
@@ -163,106 +222,142 @@ fun LaresApp(controller: CameraController) {
                     enabled = hasCamera && !viewModel.busy,
                     modifier = Modifier.weight(1f),
                 ) {
-                    Text("Set Reference")
+                    Text("Ref")
                 }
             }
-
-            ChoreList(viewModel)
-
             OutlinedButton(
-                onClick = { viewModel.refreshChores() },
+                onClick = { showChores = true },
                 modifier = Modifier.fillMaxWidth(),
             ) {
-                Text("Refresh")
+                Text("Chores (${viewModel.chores.size})")
+            }
+        }
+    }
+
+    if (showSettings) {
+        SettingsDialog(
+            viewModel = viewModel,
+            onDismiss = { showSettings = false },
+        )
+    }
+
+    howChore?.let { chore ->
+        HowDialog(
+            chore = chore,
+            onDismiss = { howChore = null },
+            onSave = {
+                viewModel.saveSnapshot(context, chore)
+                howChore = null
+            },
+        )
+    }
+
+    if (showChores) {
+        ModalBottomSheet(onDismissRequest = { showChores = false }, sheetState = sheetState) {
+            Column(
+                modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp).padding(bottom = 24.dp),
+                verticalArrangement = Arrangement.spacedBy(8.dp),
+            ) {
+                Text("Chores", style = MaterialTheme.typography.titleMedium)
+                if (viewModel.chores.isEmpty()) {
+                    Text("No chores yet. Scan or sweep the room.", style = MaterialTheme.typography.bodySmall)
+                }
+                LazyColumn(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    items(viewModel.chores) { chore ->
+                        ChoreCard(
+                            chore = chore,
+                            onHow = { howChore = chore },
+                            onToggle = { viewModel.setStatus(chore.id, it) },
+                        )
+                    }
+                }
             }
         }
     }
 }
 
-/** Configuration inputs for the server connection and analysis mode. */
+/** Settings dialog: server URL, room, and reference description. */
 @Composable
-private fun SettingsPanel(viewModel: MainViewModel) {
-    OutlinedTextField(
-        value = viewModel.serverUrl,
-        onValueChange = { viewModel.serverUrl = it },
-        label = { Text("Server URL") },
-        singleLine = true,
-        modifier = Modifier.fillMaxWidth(),
-    )
-    OutlinedTextField(
-        value = viewModel.roomId,
-        onValueChange = { viewModel.roomId = it },
-        label = { Text("Room") },
-        singleLine = true,
-        modifier = Modifier.fillMaxWidth(),
-    )
-    OutlinedTextField(
-        value = viewModel.description,
-        onValueChange = { viewModel.description = it },
-        label = { Text("Reference description") },
-        singleLine = true,
-        modifier = Modifier.fillMaxWidth(),
-    )
-    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-        FilterChip(
-            selected = viewModel.mode == AnalyzeMode.ANALYZE_MODE_DISCOVER,
-            onClick = { viewModel.mode = AnalyzeMode.ANALYZE_MODE_DISCOVER },
-            label = { Text("Discover") },
-        )
-        FilterChip(
-            selected = viewModel.mode == AnalyzeMode.ANALYZE_MODE_DIFF,
-            onClick = { viewModel.mode = AnalyzeMode.ANALYZE_MODE_DIFF },
-            label = { Text("Diff vs reference") },
-        )
-    }
-}
-
-/** The persisted chore list with tap-to-done lifecycle transitions. */
-@Composable
-private fun ChoreList(viewModel: MainViewModel) {
-    Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-        Text("Chores", style = MaterialTheme.typography.titleMedium)
-        if (viewModel.chores.isEmpty()) {
-            Text(
-                "No chores yet. Hold the camera still to auto-scan, or tap Scan.",
-                style = MaterialTheme.typography.bodySmall,
-            )
-        }
-        viewModel.chores.forEach { chore ->
-            ChoreCard(chore) { status ->
-                viewModel.setStatus(chore.id, status)
+private fun SettingsDialog(viewModel: MainViewModel, onDismiss: () -> Unit) {
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("Settings") },
+        text = {
+            Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                OutlinedTextField(
+                    value = viewModel.serverUrl,
+                    onValueChange = { viewModel.serverUrl = it },
+                    label = { Text("Server URL") },
+                    singleLine = true,
+                )
+                OutlinedTextField(
+                    value = viewModel.roomId,
+                    onValueChange = { viewModel.roomId = it },
+                    label = { Text("Room") },
+                    singleLine = true,
+                )
+                OutlinedTextField(
+                    value = viewModel.description,
+                    onValueChange = { viewModel.description = it },
+                    label = { Text("Reference description") },
+                    singleLine = true,
+                )
             }
-        }
-    }
+        },
+        confirmButton = { TextButton(onClick = onDismiss) { Text("Done") } },
+    )
 }
 
-/** A single chore with a done/restore toggle. */
+/** How-to dialog for a chore, with an optional annotated snapshot save. */
 @Composable
-private fun ChoreCard(chore: dev.randozart.lares.proto.ChoreEntity, onToggle: (ChoreStatus) -> Unit) {
+private fun HowDialog(chore: ChoreEntity, onDismiss: () -> Unit, onSave: () -> Unit) {
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text(chore.action) },
+        text = {
+            val steps = chore.howToList.ifEmpty { listOf(chore.action) }
+            Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                steps.forEachIndexed { index, step ->
+                    Text("${index + 1}. $step", style = MaterialTheme.typography.bodyMedium)
+                }
+            }
+        },
+        confirmButton = { TextButton(onClick = onDismiss) { Text("Done") } },
+        dismissButton = { TextButton(onClick = onSave) { Text("Save snapshot") } },
+    )
+}
+
+/** A single chore with a how-to and a done/restore toggle. */
+@Composable
+private fun ChoreCard(
+    chore: ChoreEntity,
+    onHow: () -> Unit,
+    onToggle: (ChoreStatus) -> Unit,
+) {
     val done = chore.status == ChoreStatus.CHORE_STATUS_DONE ||
         chore.status == ChoreStatus.CHORE_STATUS_DISMISSED
     Card(modifier = Modifier.fillMaxWidth()) {
-        Row(
+        Column(
             modifier = Modifier.fillMaxWidth().padding(12.dp),
-            verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.spacedBy(12.dp),
+            verticalArrangement = Arrangement.spacedBy(8.dp),
         ) {
-            Column(modifier = Modifier.weight(1f)) {
-                Text(
-                    chore.action,
-                    style = MaterialTheme.typography.bodyLarge,
-                )
-                Text(
-                    chore.subtasksList.joinToString(" → "),
-                    style = MaterialTheme.typography.bodySmall,
-                )
-            }
-            OutlinedButton(
-                onClick = {
-                    onToggle(if (done) ChoreStatus.CHORE_STATUS_DISCOVERED else ChoreStatus.CHORE_STATUS_DONE)
-                },
-            ) {
-                Text(if (done) "Restore" else "Done")
+            Text(chore.action, style = MaterialTheme.typography.bodyLarge)
+            Text(
+                chore.subtasksList.joinToString(" → "),
+                style = MaterialTheme.typography.bodySmall,
+            )
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                OutlinedButton(onClick = onHow, modifier = Modifier.weight(1f)) {
+                    Text("How")
+                }
+                OutlinedButton(
+                    onClick = {
+                        onToggle(if (done) ChoreStatus.CHORE_STATUS_DISCOVERED else ChoreStatus.CHORE_STATUS_DONE)
+                    },
+                    modifier = Modifier.weight(1f),
+                ) {
+                    Text(if (done) "Restore" else "Done")
+                }
             }
         }
     }

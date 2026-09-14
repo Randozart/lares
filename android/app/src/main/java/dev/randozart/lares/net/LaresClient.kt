@@ -57,6 +57,18 @@ class LaresClient {
         return builder.build()
     }
 
+    /** Analyze a pan sweep of consecutive frames in a single request. */
+    fun analyzeSweep(baseUrl: String, roomId: String, jpegs: List<ByteArray>): AnalyzeSceneResponse {
+        val request = AnalyzeSceneRequest.newBuilder()
+            .setRoomId(roomId)
+            .setMode(AnalyzeMode.ANALYZE_MODE_DISCOVER)
+        jpegs.forEach { request.addSweepJpegs(ByteString.copyFrom(it)) }
+        val body = post("$baseUrl/v1/analyze", printer.print(request.build()))
+        val builder = AnalyzeSceneResponse.newBuilder()
+        parser.merge(body, builder)
+        return builder.build()
+    }
+
     /** Store a room's agreed target state. */
     fun setReference(
         baseUrl: String,

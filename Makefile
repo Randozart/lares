@@ -32,6 +32,11 @@ run-server-gemini:
 android:
 	JAVA_HOME="$(JAVA_HOME)" PATH="$(JAVA_HOME)/bin:$$PATH" ANDROID_NDK_ROOT="$(ANDROID_NDK_ROOT)" ./android/gradlew -p android assembleDebug
 
+# Rebuild the APK and restart the server so /apk serves the newest build.
+apk-update: android
+	systemctl --user restart lares-server
+	@echo "APK served at http://100.111.244.0:8787/apk"
+
 android-install:
 	adb install -r android/app/build/outputs/apk/debug/app-debug.apk
 

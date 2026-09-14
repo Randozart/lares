@@ -45,7 +45,8 @@ const DDL_CHORES: &str = "CREATE TABLE IF NOT EXISTS chores (
     ymin INTEGER, xmin INTEGER, ymax INTEGER, xmax INTEGER,
     confidence REAL NOT NULL,
     subtasks TEXT NOT NULL,
-    updated_at INTEGER NOT NULL
+    updated_at INTEGER NOT NULL,
+    how_to TEXT NOT NULL DEFAULT ''
 )";
 
 /// DDL for the room references table.
@@ -98,6 +99,23 @@ impl Store {
         self.create_table(DDL_REFERENCES).await?;
         self.create_table(DDL_LANDMARKS).await?;
         self.create_table(DDL_FINGERPRINTS).await?;
+        self.ensure_how_to_column().await?;
+        Ok(())
+    }
+
+    /// Add the `how_to` column to pre-existing chore tables.
+    async fn ensure_how_to_column(&self) -> Result<(), StoreError> {
+        let row = sqlx::query(
+            "SELECT COUNT(*) AS n FROM pragma_table_info('chores') WHERE name = 'how_to'",
+        )
+        .fetch_one(&self.pool)
+        .await?;
+        let count: i64 = row.try_get("n")?;
+        if count == 0 {
+            sqlx::query("ALTER TABLE chores ADD COLUMN how_to TEXT NOT NULL DEFAULT ''")
+                .execute(&self.pool)
+                .await?;
+        }
         Ok(())
     }
 
@@ -114,14 +132,15 @@ impl Store {
             sqlx::query(
                 "INSERT INTO chores
                     (id, room_id, target, action, estimated_seconds, status,
-                     ymin, xmin, ymax, xmax, confidence, subtasks, updated_at)
-                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                     ymin, xmin, ymax, xmax, confidence, subtasks, updated_at, how_to)
+                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                  ON CONFLICT(id) DO UPDATE SET
                     room_id=excluded.room_id, target=excluded.target,
                     action=excluded.action, estimated_seconds=excluded.estimated_seconds,
                     status=excluded.status, ymin=excluded.ymin, xmin=excluded.xmin,
                     ymax=excluded.ymax, xmax=excluded.xmax, confidence=excluded.confidence,
-                    subtasks=excluded.subtasks, updated_at=excluded.updated_at",
+                    subtasks=excluded.subtasks, updated_at=excluded.updated_at,
+                    how_to=excluded.how_to",
             )
             .bind(&chore.id)
             .bind(&chore.room_id)
@@ -136,6 +155,7 @@ impl Store {
             .bind(chore.confidence as f64)
             .bind(serde_json::to_string(&chore.subtasks).unwrap_or_default())
             .bind(now_unix())
+            .bind(serde_json::to_string(&chore.how_to).unwrap_or_default())
             .execute(&mut *tx)
             .await?;
         }
@@ -234,7 +254,11 @@ impl Store {
             .bind(room_id)
             .execute(&mut *tx)
             .await?;
+        let mut seen = std::collections::HashSet::new();
         for landmark in landmarks {
+            if !seen.insert(landmark.label.clone()) {
+                continue;
+            }
             sqlx::query(
                 "INSERT INTO room_landmarks
                     (room_id, label, ymin, xmin, ymax, xmax, updated_at)
@@ -325,6 +349,9 @@ fn row_to_chore(row: &sqlx::sqlite::SqliteRow) -> Result<ChoreEntity, StoreError
     let subtasks_raw: String = row.try_get("subtasks")?;
     let subtasks: Vec<String> = serde_json::from_str(&subtasks_raw)
         .map_err(|e| StoreError::Decode(format!("subtasks: {e}")))?;
+    let how_to_raw: String = row.try_get("how_to").unwrap_or_default();
+    let how_to: Vec<String> = serde_json::from_str(&how_to_raw)
+        .map_err(|e| StoreError::Decode(format!("how_to: {e}")))?;
     let ymin = row.try_get::<Option<i64>, _>("ymin")?;
     let xmin = row.try_get::<Option<i64>, _>("xmin")?;
     let ymax = row.try_get::<Option<i64>, _>("ymax")?;
@@ -348,6 +375,7 @@ fn row_to_chore(row: &sqlx::sqlite::SqliteRow) -> Result<ChoreEntity, StoreError
         r#box: box_,
         confidence: row.try_get("confidence")?,
         subtasks,
+        how_to,
         last_seen_unix: Some(row.try_get::<i64, _>("updated_at")?),
         ..Default::default()
     })
@@ -418,6 +446,11 @@ mod tests {
             r#box: Some(BoundingBox { ymin: 1, xmin: 2, ymax: 3, xmax: 4 }),
             confidence: 0.9,
             subtasks: vec!["load".to_string()],
+            how_to: vec![
+                "Pick up the mug".to_string(),
+                "Open the dishwasher".to_string(),
+                "Place the mug on the rack".to_string(),
+            ],
             ..Default::default()
         }
     }
@@ -431,6 +464,8 @@ mod tests {
         assert_eq!(listed.len(), 1);
         assert_eq!(listed[0].id, "c1");
         assert_eq!(listed[0].subtasks, vec!["load".to_string()]);
+        assert_eq!(listed[0].how_to.len(), 3);
+        assert!(listed[0].how_to[0].contains("mug"));
         assert_eq!(listed[0].status, ChoreStatus::Discovered as i32);
 
         let updated = store.set_status("c1", ChoreStatus::Done).await.unwrap();

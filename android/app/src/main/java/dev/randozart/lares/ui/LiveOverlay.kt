@@ -41,7 +41,9 @@ fun LiveOverlay(
                 it.status == ChoreStatus.CHORE_STATUS_DONE ||
                     it.status == ChoreStatus.CHORE_STATUS_DISMISSED
             } == true
-            drawBox(box, if (muted) MutedColor else BoxColor, chore?.action)
+            val base = if (muted) MutedColor else BoxColor
+            val alpha = box.confidence.coerceIn(0.12f, 1f)
+            drawBox(box, base.copy(alpha = alpha), chore?.action)
         }
         landmarks.forEach { landmark ->
             if (landmark.hasBox()) {

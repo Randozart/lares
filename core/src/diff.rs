@@ -14,17 +14,22 @@ use crate::domain::{
 /// Grid cell size (in normalized units) for near-duplicate collapsing.
 const DEDUPE_CELL: i32 = 120;
 
+/// Maximum number of chores returned per scan.
+const MAX_CHORES: usize = 6;
+
 /// Post-process raw engine chores into final, stable entities.
 ///
-/// Applies [`normalize_chore`], retention filters, and near-duplicate
-/// collapsing. The result is sorted by descending confidence.
+/// Applies [`normalize_chore`], retention filters, near-duplicate collapsing,
+/// and caps the result at [`MAX_CHORES`] by descending confidence.
 pub fn postprocess(mut chores: Vec<ChoreEntity>, room_id: &str) -> Vec<ChoreEntity> {
     let now = now_unix();
     for chore in &mut chores {
         normalize_chore(chore, room_id, now);
     }
     chores.retain(keep_chore);
-    collapse_near_duplicates(chores)
+    let mut collapsed = collapse_near_duplicates(chores);
+    collapsed.truncate(MAX_CHORES);
+    collapsed
 }
 
 /// Normalize one chore in place: identity, room, status, box, subtasks, time.
@@ -43,6 +48,9 @@ fn normalize_chore(chore: &mut ChoreEntity, room_id: &str, now: i64) {
     }
     if chore.subtasks.is_empty() && !chore.action.is_empty() {
         chore.subtasks.push(chore.action.clone());
+    }
+    if chore.how_to.is_empty() {
+        chore.how_to = vec![format!("Do the chore: {}", chore.action)];
     }
     chore.last_seen_unix = Some(now);
 }

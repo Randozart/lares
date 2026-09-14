@@ -64,6 +64,12 @@ message ChoreEntity {
   repeated string context_tags = 14;
   // Subjective effort cost in the range 0.0..=1.0.
   optional float energy_cost = 15;
+  // Concrete, judgment-free physical steps for doing the chore. Never empty
+  // after post-processing. Example for "put away": "1. Pick up the mug.
+  // 2. Walk to the cupboard. 3. Put it on the middle shelf."
+  repeated string how_to = 16;
+  // Frame index (0-based) the chore was detected in, for sweep captures.
+  int32 image_index = 17;
 }
 
 // A persistent, named spatial anchor in a room (e.g. sink basin, hamper).

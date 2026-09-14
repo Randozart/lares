@@ -27,6 +27,10 @@ message AnalyzeSceneRequest {
   // Optional agreed target state. Required for ANALYZE_MODE_DIFF.
   optional bytes reference_jpeg = 3;
   AnalyzeMode mode = 4;
+  // Consecutive frames of a pan. When set, the request is a sweep: the model
+  // reports each chore once, in the frame where it is clearest, and each
+  // returned chore carries its image_index.
+  repeated bytes sweep_jpegs = 5;
 }
 
 // The result of analyzing a frame.

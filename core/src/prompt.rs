@@ -11,8 +11,32 @@ pub fn discover_system_prompt() -> String {
     concat!(
         "You are an assistive vision system that turns messy rooms into clear, actionable tasks. ",
         "Analyze the room image and identify actionable physical chores. ",
-        "Ignore items that are properly stored. ",
+        "Be conservative: only report items you can see clearly. ",
+        "If you are not sure of the specific type of an object, use a generic label ",
+        "(e.g. \"drink container\") rather than guessing a specific one. ",
+        "Ignore items that are properly stored, and omit anything you are not sure ",
+        "needs attention. ",
         "Prefer atomic, single-step actions over broad tasks. ",
+        "For every chore provide 2-4 concrete physical steps in `how_to` ",
+        "that a person can follow without needing judgment: name the specific ",
+        "object, where it goes, and what to do with it. ",
+        "Return ONLY JSON matching the provided schema."
+    )
+    .to_string()
+}
+
+/// System instruction for a multi-frame sweep of a single room.
+pub fn sweep_system_prompt() -> String {
+    concat!(
+        "You are an assistive vision system that turns messy rooms into clear, actionable tasks. ",
+        "The user has panned across a room and provided several consecutive frames. ",
+        "Identify actionable physical chores across the whole room. ",
+        "Report each chore ONCE, in the frame where it is clearest, and set `image` ",
+        "to that frame's 0-based index. ",
+        "Be conservative: only report items you can see clearly; use a generic label ",
+        "when unsure of the specific type (e.g. \"drink container\") rather than guessing. ",
+        "Ignore properly stored items and omit anything that does not clearly need attention. ",
+        "For every chore provide 2-4 concrete physical steps in `how_to`. ",
         "Return ONLY JSON matching the provided schema."
     )
     .to_string()
@@ -41,6 +65,42 @@ pub fn diff_user_prompt() -> String {
         .to_string()
 }
 
+/// User-facing instruction for a sweep.
+pub fn sweep_user_prompt() -> String {
+    "These frames are consecutive views of one room during a pan. List every "
+        .to_string()
+        + "actionable chore once, in the frame where it is clearest."
+}
+
+/// JSON schema for a single chore entry.
+fn chore_item_schema() -> Value {
+    json!({
+        "type": "object",
+        "properties": {
+            "box_2d": {
+                "type": "array",
+                "items": { "type": "integer" },
+                "description": "[ymin, xmin, ymax, xmax] normalized 0-1000"
+            },
+            "target": { "type": "string" },
+            "action": { "type": "string" },
+            "estimated_seconds": { "type": "integer" },
+            "confidence": { "type": "number" },
+            "subtasks": { "type": "array", "items": { "type": "string" } },
+            "how_to": {
+                "type": "array",
+                "items": { "type": "string" },
+                "description": "2-4 concrete physical steps, naming specific objects and destinations"
+            },
+            "image": {
+                "type": "integer",
+                "description": "Frame index (0-based) this chore was seen in; only set for sweeps"
+            }
+        },
+        "required": ["box_2d", "target", "action", "estimated_seconds"]
+    })
+}
+
 /// JSON schema constraining the model's structured output.
 pub fn response_schema() -> Value {
     json!({
@@ -48,22 +108,7 @@ pub fn response_schema() -> Value {
         "properties": {
             "chores": {
                 "type": "array",
-                "items": {
-                    "type": "object",
-                    "properties": {
-                        "box_2d": {
-                            "type": "array",
-                            "items": { "type": "integer" },
-                            "description": "[ymin, xmin, ymax, xmax] normalized 0-1000"
-                        },
-                        "target": { "type": "string" },
-                        "action": { "type": "string" },
-                        "estimated_seconds": { "type": "integer" },
-                        "confidence": { "type": "number" },
-                        "subtasks": { "type": "array", "items": { "type": "string" } }
-                    },
-                    "required": ["box_2d", "target", "action", "estimated_seconds"]
-                }
+                "items": chore_item_schema()
             },
             "landmarks": {
                 "type": "array",

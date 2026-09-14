@@ -33,6 +33,8 @@ pub struct TrackedBox {
     pub xmax: f32,
     /// Bottom edge, normalized 0..=1000.
     pub ymax: f32,
+    /// Match confidence in the latest frame; fades as the box is lost.
+    pub confidence: f32,
 }
 
 /// A cropped grayscale region (e.g. a landmark patch).
@@ -47,10 +49,16 @@ pub struct ImagePatch {
 }
 
 /// Match confidence below which a box is treated as lost.
-const MIN_CONFIDENCE: f32 = 0.55;
+const MIN_CONFIDENCE: f32 = 0.75;
 
 /// Coarse-to-fine search half-width (pixels) around the last position.
-const DEFAULT_SEARCH_HALF: u32 = 32;
+const DEFAULT_SEARCH_HALF: u32 = 48;
+
+/// EMA factor applied toward the matched position each frame.
+const EMA_ALPHA: f32 = 0.6;
+
+/// Confidence multiplier applied while a box is lost.
+const LOST_DECAY: f32 = 0.5;
 
 /// Grid dimension for the scene fingerprint (produces 64 bits).
 const FINGERPRINT_GRID: u32 = 8;
@@ -83,6 +91,8 @@ struct AnchorPatch {
     frame_h: u32,
     /// Consecutive lost frames; the next VLM anchor clears it.
     lost: u32,
+    /// Latest match confidence; used to fade boxes as they are lost.
+    confidence: f32,
 }
 
 /// The live tracker. Methods take `&self` with interior mutability because
@@ -168,6 +178,7 @@ impl AnchorPatch {
             ymin: ((cy - half_h) / h * 1000.0).clamp(0.0, 1000.0),
             xmax: ((cx + half_w) / w * 1000.0).clamp(0.0, 1000.0),
             ymax: ((cy + half_h) / h * 1000.0).clamp(0.0, 1000.0),
+            confidence: self.confidence,
         }
     }
 }
@@ -287,6 +298,7 @@ impl LaresTracker {
                 frame_w: w,
                 frame_h: h,
                 lost: 0,
+                confidence: 1.0,
             });
         }
     }
@@ -301,13 +313,19 @@ impl LaresTracker {
                 if confidence >= MIN_CONFIDENCE {
                     let nx = (patch.pos.0 as i32 + dx).clamp(0, patch.frame_w as i32 - 1) as u32;
                     let ny = (patch.pos.1 as i32 + dy).clamp(0, patch.frame_h as i32 - 1) as u32;
-                    patch.pos = (nx, ny);
+                    patch.pos.0 = (patch.pos.0 as f32 * (1.0 - EMA_ALPHA) + nx as f32 * EMA_ALPHA)
+                        .round() as u32;
+                    patch.pos.1 = (patch.pos.1 as f32 * (1.0 - EMA_ALPHA) + ny as f32 * EMA_ALPHA)
+                        .round() as u32;
                     patch.lost = 0;
+                    patch.confidence = confidence;
                 } else {
                     patch.lost += 1;
+                    patch.confidence *= LOST_DECAY;
                 }
             } else {
                 patch.lost += 1;
+                patch.confidence *= LOST_DECAY;
             }
             let mut box_ = patch.to_norm();
             box_.id = patch.id.clone();
@@ -405,10 +423,15 @@ mod tests {
             ymin: 400.0,
             xmax: 600.0,
             ymax: 600.0,
+            confidence: 1.0,
         };
         tracker.anchor(&base, vec![box_.clone()]);
         // Shift the scene content right by 10px: draw the noise at x-10.
         let shifted = frame(320, 240, |x, y| noisy(x.saturating_sub(10), y));
+        // EMA converges over a few frames, as it would at 15fps in reality.
+        for _ in 0..12 {
+            tracker.track(&shifted);
+        }
         let out = tracker.track(&shifted);
         assert_eq!(out.len(), 1);
         let moved = &out[0];
@@ -429,6 +452,7 @@ mod tests {
             ymin: 400.0,
             xmax: 600.0,
             ymax: 600.0,
+            confidence: 1.0,
         };
         tracker.anchor(&base, vec![box_.clone()]);
         let out = tracker.track(&base);
@@ -467,6 +491,7 @@ mod tests {
             ymin: 250.0,
             xmax: 750.0,
             ymax: 750.0,
+            confidence: 1.0,
         };
         let patch = tracker.patch(&base, box_);
         assert_eq!(patch.width, 100);

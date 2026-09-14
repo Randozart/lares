@@ -16,16 +16,16 @@ use crate::domain::{
 };
 use crate::prompt::{
     diff_system_prompt, diff_user_prompt, discover_system_prompt, discover_user_prompt,
-    response_schema,
+    response_schema, sweep_system_prompt, sweep_user_prompt,
 };
 
 use super::{InferenceError, VisionInferenceEngine};
 
 /// Default Gemini model identifier, overridable via `LARES_MODEL`.
 ///
-/// Chore detection is a lightweight task; the full flash model is overkill.
-/// Lite cuts cost and latency with no measurable accuracy loss for this use.
-pub const DEFAULT_MODEL: &str = "gemini-2.5-flash-lite";
+/// Full flash (thinking off) is used over lite: it measures the same latency
+/// and misclassifies far less (e.g. glass of soda seen as a can).
+pub const DEFAULT_MODEL: &str = "gemini-2.5-flash";
 
 /// Longest-side pixel limit for images sent to the model.
 const MAX_INPUT_DIM: u32 = 1280;
@@ -89,12 +89,23 @@ impl VisionInferenceEngine for GeminiEngine {
 impl GeminiEngine {
     /// Build the generateContent request body for a scene request.
     fn build_body(&self, req: &AnalyzeSceneRequest) -> Value {
+        let mut parts = Vec::new();
+        if !req.sweep_jpegs.is_empty() {
+            parts.push(json!({ "text": sweep_user_prompt() }));
+            for jpeg in &req.sweep_jpegs {
+                parts.push(inline_image(&downscale_jpeg(jpeg, MAX_INPUT_DIM)));
+            }
+            return json!({
+                "system_instruction": { "parts": [ { "text": sweep_system_prompt() } ] },
+                "contents": [ { "role": "user", "parts": parts } ],
+                "generationConfig": generation_config(&self.model)
+            });
+        }
         let (system, user) = match req.mode == AnalyzeMode::Diff as i32 {
             true => (diff_system_prompt(), diff_user_prompt()),
             false => (discover_system_prompt(), discover_user_prompt()),
         };
         let frame = downscale_jpeg(&req.frame_jpeg, MAX_INPUT_DIM);
-        let mut parts = Vec::new();
         if req.mode == AnalyzeMode::Diff as i32 {
             if let Some(reference) = req.reference_jpeg.as_deref() {
                 parts.push(json!({ "text": "Image A (agreed target state):" }));
@@ -147,12 +158,14 @@ fn inline_image(jpeg: &[u8]) -> Value {
 /// Build the generation configuration, disabling model "thinking".
 ///
 /// Thinking models (the 2.5 family) add seconds of hidden inference before the
-/// JSON payload. Chores do not need reasoning, so it is turned off.
+/// JSON payload. Chores do not need reasoning, so it is turned off. Temperature
+/// 0 keeps output deterministic and reduces invented labels.
 fn generation_config(model: &str) -> Value {
     let mut config = json!({
         "responseMimeType": "application/json",
         "responseSchema": response_schema(),
-        "maxOutputTokens": 4096
+        "maxOutputTokens": 4096,
+        "temperature": 0
     });
     if model.contains("2.5") {
         config["thinkingConfig"] = json!({ "thinkingBudget": 0 });
@@ -210,6 +223,10 @@ struct RawChore {
     confidence: f32,
     #[serde(default)]
     subtasks: Vec<String>,
+    #[serde(default)]
+    how_to: Vec<String>,
+    #[serde(default)]
+    image: i32,
 }
 
 /// A named landmark as emitted by the model.
@@ -259,6 +276,8 @@ fn raw_to_entity(raw: RawChore) -> Option<ChoreEntity> {
         }),
         confidence: raw.confidence,
         subtasks: raw.subtasks,
+        how_to: raw.how_to,
+        image_index: raw.image,
         ..Default::default()
     })
 }
@@ -325,6 +344,7 @@ mod tests {
             frame_jpeg: vec![1, 2, 3],
             reference_jpeg: Some(vec![4, 5, 6]),
             mode: AnalyzeMode::Diff.into(),
+            sweep_jpegs: Vec::new(),
         };
         let body = engine.build_body(&req);
         let parts = body["contents"][0]["parts"].as_array().unwrap();
