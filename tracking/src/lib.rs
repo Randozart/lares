@@ -181,6 +181,52 @@ impl AnchorPatch {
             confidence: self.confidence,
         }
     }
+
+    /// Convert to a tracked box with the patch's id.
+    fn to_tracked_box(&self) -> TrackedBox {
+        let mut b = self.to_norm();
+        b.id = self.id.clone();
+        b
+    }
+}
+
+/// Apply a match result to a patch: update position, lost count, confidence.
+fn update_patch_from_match(patch: &mut AnchorPatch, match_result: Option<(i32, i32, f32)>) {
+    let Some((dx, dy, confidence)) = match_result else {
+        mark_lost(patch);
+        return;
+    };
+    if confidence < MIN_CONFIDENCE {
+        mark_lost(patch);
+        return;
+    }
+    let nx = patch.pos.0 as i32 + dx;
+    let ny = patch.pos.1 as i32 + dy;
+    let hw = patch.frame_w as i32 / 4;
+    let hh = patch.frame_h as i32 / 4;
+    let clamped_x = nx.clamp(-hw, patch.frame_w as i32 + hw);
+    let clamped_y = ny.clamp(-hh, patch.frame_h as i32 + hh);
+    patch.pos.0 = (patch.pos.0 as f32 * (1.0 - EMA_ALPHA) + clamped_x as f32 * EMA_ALPHA)
+        .round()
+        .max(0.0) as u32;
+    patch.pos.1 = (patch.pos.1 as f32 * (1.0 - EMA_ALPHA) + clamped_y as f32 * EMA_ALPHA)
+        .round()
+        .max(0.0) as u32;
+    patch.lost = 0;
+    patch.confidence = confidence;
+    let leaving = nx < -(patch.frame_w as i32 / 2)
+        || ny < -(patch.frame_h as i32 / 2)
+        || nx > patch.frame_w as i32 * 3 / 2
+        || ny > patch.frame_h as i32 * 3 / 2;
+    if leaving {
+        patch.confidence *= LOST_DECAY;
+    }
+}
+
+/// Increment the lost counter and decay confidence.
+fn mark_lost(patch: &mut AnchorPatch) {
+    patch.lost += 1;
+    patch.confidence *= LOST_DECAY;
 }
 
 /// Sum of absolute differences between a patch and the frame at an offset.
@@ -308,28 +354,8 @@ impl LaresTracker {
         let mut patches = lock_patches(&self.patches);
         let mut out = Vec::with_capacity(patches.len());
         for patch in patches.iter_mut() {
-            let moved = find_best_offset(frame, patch, self.search_half);
-            if let Some((dx, dy, confidence)) = moved {
-                if confidence >= MIN_CONFIDENCE {
-                    let nx = (patch.pos.0 as i32 + dx).clamp(0, patch.frame_w as i32 - 1) as u32;
-                    let ny = (patch.pos.1 as i32 + dy).clamp(0, patch.frame_h as i32 - 1) as u32;
-                    patch.pos.0 = (patch.pos.0 as f32 * (1.0 - EMA_ALPHA) + nx as f32 * EMA_ALPHA)
-                        .round() as u32;
-                    patch.pos.1 = (patch.pos.1 as f32 * (1.0 - EMA_ALPHA) + ny as f32 * EMA_ALPHA)
-                        .round() as u32;
-                    patch.lost = 0;
-                    patch.confidence = confidence;
-                } else {
-                    patch.lost += 1;
-                    patch.confidence *= LOST_DECAY;
-                }
-            } else {
-                patch.lost += 1;
-                patch.confidence *= LOST_DECAY;
-            }
-            let mut box_ = patch.to_norm();
-            box_.id = patch.id.clone();
-            out.push(box_);
+            update_patch_from_match(patch, find_best_offset(frame, patch, self.search_half));
+            out.push(patch.to_tracked_box());
         }
         out
     }

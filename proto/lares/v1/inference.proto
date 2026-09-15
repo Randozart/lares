@@ -31,6 +31,8 @@ message AnalyzeSceneRequest {
   // reports each chore once, in the frame where it is clearest, and each
   // returned chore carries its image_index.
   repeated bytes sweep_jpegs = 5;
+  // Typed room area so the model can reason about object expectations.
+  RoomArea room_area = 6;
 }
 
 // The result of analyzing a frame.

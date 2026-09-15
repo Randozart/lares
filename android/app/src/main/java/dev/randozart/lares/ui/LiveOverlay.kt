@@ -23,27 +23,49 @@ private val MutedColor = Color(0xFF9E9E9E)
 private val LandmarkColor = Color(0xFF42A5F5)
 
 /**
- * Draws tracked boxes and landmarks over the live preview. Frames are rotated
- * to display orientation before tracking, so normalized (0..1000) coordinates
- * map directly onto the canvas.
+ * Draws tracked boxes and landmarks over the live preview. Accounts for the
+ * PreviewView.ScaleType.FILL_CENTER transform by computing the scale and crop
+ * offset between the camera analysis frame and the screen canvas.
  */
 @Composable
 fun LiveOverlay(
     boxes: List<TrackedBox>,
     choresById: Map<String, ChoreEntity>,
     landmarks: List<Landmark>,
+    frameW: Int,
+    frameH: Int,
     modifier: Modifier = Modifier,
 ) {
     Canvas(modifier = modifier) {
-        boxes.forEach { box ->
+        // Compute FILL_CENTER transform: camera frame → screen canvas.
+        val fw = frameW.coerceAtLeast(1).toFloat()
+        val fh = frameH.coerceAtLeast(1).toFloat()
+        val screenRatio = size.width / size.height
+        val frameRatio = fw / fh
+        val scale: Float
+        val offsetX: Float
+        val offsetY: Float
+        if (frameRatio > screenRatio) {
+            // Frame wider than screen → crop left/right.
+            scale = size.height / fh
+            offsetX = (size.width - fw * scale) / 2f
+            offsetY = 0f
+        } else {
+            // Frame taller than screen → crop top/bottom.
+            scale = size.width / fw
+            offsetX = 0f
+            offsetY = (size.height - fh * scale) / 2f
+        }
+
+        boxes.filter { it.confidence >= 0.15f }.forEach { box ->
             val chore = choresById[box.id]
             val muted = chore?.let {
                 it.status == ChoreStatus.CHORE_STATUS_DONE ||
                     it.status == ChoreStatus.CHORE_STATUS_DISMISSED
             } == true
             val base = if (muted) MutedColor else BoxColor
-            val alpha = box.confidence.coerceIn(0.12f, 1f)
-            drawBox(box, base.copy(alpha = alpha), chore?.action)
+            val alpha = box.confidence.coerceIn(0.15f, 1f)
+            drawBox(box, base.copy(alpha = alpha), chore?.action, fw, fh, scale, offsetX, offsetY)
         }
         landmarks.forEach { landmark ->
             if (landmark.hasBox()) {
@@ -52,6 +74,7 @@ fun LiveOverlay(
                     b.ymin.toFloat(), b.xmin.toFloat(),
                     b.ymax.toFloat(), b.xmax.toFloat(),
                     LandmarkColor, landmark.label,
+                    fw, fh, scale, offsetX, offsetY,
                 )
             }
         }
@@ -59,11 +82,20 @@ fun LiveOverlay(
 }
 
 /** Draw a tracked box scaled into the canvas with an optional label. */
-private fun DrawScope.drawBox(box: TrackedBox, color: Color, label: String?) {
-    drawNormBox(box.ymin, box.xmin, box.ymax, box.xmax, color, label)
+private fun DrawScope.drawBox(
+    box: TrackedBox,
+    color: Color,
+    label: String?,
+    fw: Float,
+    fh: Float,
+    scale: Float,
+    offsetX: Float,
+    offsetY: Float,
+) {
+    drawNormBox(box.ymin, box.xmin, box.ymax, box.xmax, color, label, fw, fh, scale, offsetX, offsetY)
 }
 
-/** Draw a normalized (0..1000) box scaled into the canvas. */
+/** Draw a normalized (0..1000) box scaled into the canvas with FILL_CENTER transform. */
 private fun DrawScope.drawNormBox(
     ymin: Float,
     xmin: Float,
@@ -71,11 +103,16 @@ private fun DrawScope.drawNormBox(
     xmax: Float,
     color: Color,
     label: String?,
+    fw: Float,
+    fh: Float,
+    scale: Float,
+    offsetX: Float,
+    offsetY: Float,
 ) {
-    val left = xmin / 1000f * size.width
-    val top = ymin / 1000f * size.height
-    val right = xmax / 1000f * size.width
-    val bottom = ymax / 1000f * size.height
+    val left = xmin / 1000f * fw * scale + offsetX
+    val top = ymin / 1000f * fh * scale + offsetY
+    val right = xmax / 1000f * fw * scale + offsetX
+    val bottom = ymax / 1000f * fh * scale + offsetY
     drawRect(
         color = color,
         topLeft = Offset(left, top),

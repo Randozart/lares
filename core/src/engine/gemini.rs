@@ -11,8 +11,8 @@ use base64::Engine;
 use serde_json::{json, Value};
 
 use crate::domain::{
-    AnalyzeMode, AnalyzeSceneRequest, AnalyzeSceneResponse, BoundingBox, ChoreEntity,
-    ChoreStatus, Landmark,
+    area_display_name, AnalyzeMode, AnalyzeSceneRequest, AnalyzeSceneResponse, BoundingBox,
+    ChoreEntity, ChoreStatus, Landmark, RoomArea,
 };
 use crate::prompt::{
     diff_system_prompt, diff_user_prompt, discover_system_prompt, discover_user_prompt,
@@ -89,9 +89,10 @@ impl VisionInferenceEngine for GeminiEngine {
 impl GeminiEngine {
     /// Build the generateContent request body for a scene request.
     fn build_body(&self, req: &AnalyzeSceneRequest) -> Value {
+        let area_name = area_display_name(RoomArea::try_from(req.room_area).unwrap_or_default());
         let mut parts = Vec::new();
         if !req.sweep_jpegs.is_empty() {
-            parts.push(json!({ "text": sweep_user_prompt() }));
+            parts.push(json!({ "text": sweep_user_prompt(area_name) }));
             for jpeg in &req.sweep_jpegs {
                 parts.push(inline_image(&downscale_jpeg(jpeg, MAX_INPUT_DIM)));
             }
@@ -102,8 +103,8 @@ impl GeminiEngine {
             });
         }
         let (system, user) = match req.mode == AnalyzeMode::Diff as i32 {
-            true => (diff_system_prompt(), diff_user_prompt()),
-            false => (discover_system_prompt(), discover_user_prompt()),
+            true => (diff_system_prompt(), diff_user_prompt(area_name)),
+            false => (discover_system_prompt(), discover_user_prompt(area_name)),
         };
         let frame = downscale_jpeg(&req.frame_jpeg, MAX_INPUT_DIM);
         if req.mode == AnalyzeMode::Diff as i32 {
@@ -227,6 +228,8 @@ struct RawChore {
     how_to: Vec<String>,
     #[serde(default)]
     image: i32,
+    #[serde(default)]
+    object_index: i32,
 }
 
 /// A named landmark as emitted by the model.
@@ -243,11 +246,20 @@ fn default_confidence() -> f32 {
 
 /// Extract chores and landmarks from the raw generateContent response.
 fn parse_response(body: Value) -> Result<ParsedScene, InferenceError> {
-    let text = body["candidates"][0]["content"]["parts"][0]["text"]
-        .as_str()
+    let parts = body["candidates"][0]["content"]["parts"]
+        .as_array()
         .ok_or_else(|| {
             InferenceError::InvalidResponse(
-                "missing candidates[0].content.parts[0].text".to_string(),
+                "missing candidates[0].content.parts".to_string(),
+            )
+        })?;
+    let text = parts
+        .iter()
+        .filter(|p| p.get("thought").and_then(|v| v.as_bool()).unwrap_or(false) != true)
+        .find_map(|p| p["text"].as_str())
+        .ok_or_else(|| {
+            InferenceError::InvalidResponse(
+                "no text part in response".to_string(),
             )
         })?;
     let parsed: RawResponse = serde_json::from_str(text)
@@ -278,6 +290,7 @@ fn raw_to_entity(raw: RawChore) -> Option<ChoreEntity> {
         subtasks: raw.subtasks,
         how_to: raw.how_to,
         image_index: raw.image,
+        object_index: raw.object_index,
         ..Default::default()
     })
 }
@@ -325,6 +338,21 @@ mod tests {
     }
 
     #[test]
+    fn skips_thought_part_and_parses_text() {
+        let body = json!({
+            "candidates": [{
+                "content": { "parts": [
+                    { "thought": true, "text": "thinking..." },
+                    { "text": r#"{"chores":[{"box_2d":[100,200,300,400],"target":"socks","action":"Put away","estimated_seconds":20}],"landmarks":[]}"# }
+                ] }
+            }]
+        });
+        let scene = parse_response(body).unwrap();
+        assert_eq!(scene.chores.len(), 1);
+        assert_eq!(scene.chores[0].target, "socks");
+    }
+
+    #[test]
     fn skips_rows_with_wrong_box_cardinality() {
         let body = json!({
             "candidates": [{
@@ -338,6 +366,7 @@ mod tests {
 
     #[test]
     fn diff_body_includes_two_images() {
+        use crate::domain::RoomArea;
         let engine = GeminiEngine::new("key", "model").unwrap();
         let req = AnalyzeSceneRequest {
             room_id: "kitchen".to_string(),
@@ -345,6 +374,7 @@ mod tests {
             reference_jpeg: Some(vec![4, 5, 6]),
             mode: AnalyzeMode::Diff.into(),
             sweep_jpegs: Vec::new(),
+            room_area: RoomArea::Kitchen.into(),
         };
         let body = engine.build_body(&req);
         let parts = body["contents"][0]["parts"].as_array().unwrap();

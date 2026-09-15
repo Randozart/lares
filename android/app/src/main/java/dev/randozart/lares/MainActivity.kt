@@ -7,6 +7,7 @@ import androidx.activity.ComponentActivity
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -17,6 +18,7 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
@@ -26,6 +28,8 @@ import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.Card
 import androidx.compose.material3.CircularProgressIndicator
+import androidx.compose.material3.DropdownMenu
+import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.FilterChip
 import androidx.compose.material3.Icon
@@ -35,6 +39,7 @@ import androidx.compose.material3.ModalBottomSheet
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Scaffold
+import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.rememberModalBottomSheetState
@@ -48,6 +53,8 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.asImageBitmap
+import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
 import androidx.core.content.ContextCompat
@@ -56,6 +63,7 @@ import dev.randozart.lares.capture.CameraController
 import dev.randozart.lares.proto.AnalyzeMode
 import dev.randozart.lares.proto.ChoreEntity
 import dev.randozart.lares.proto.ChoreStatus
+import dev.randozart.lares.proto.RoomArea
 import dev.randozart.lares.sensing.SettleDetector
 import dev.randozart.lares.ui.CameraPreview
 import dev.randozart.lares.ui.LiveOverlay
@@ -111,13 +119,13 @@ fun LaresApp(controller: CameraController) {
 
     val settleDetector = remember {
         SettleDetector(context) {
-            if (viewModel.shouldAutoScan()) {
+            if (viewModel.autoScan && viewModel.shouldAutoScan()) {
                 viewModel.captureAndAnalyze(controller, bypassGates = false)
             }
         }
     }
-    DisposableEffect(Unit) {
-        settleDetector.start()
+    DisposableEffect(viewModel.autoScan) {
+        if (viewModel.autoScan) settleDetector.start()
         onDispose { settleDetector.stop() }
     }
 
@@ -135,6 +143,8 @@ fun LaresApp(controller: CameraController) {
             boxes = viewModel.trackedBoxes,
             choresById = viewModel.choresById,
             landmarks = viewModel.landmarks,
+            frameW = viewModel.lastFrameWidth,
+            frameH = viewModel.lastFrameHeight,
             modifier = Modifier.matchParentSize(),
         )
 
@@ -166,14 +176,7 @@ fun LaresApp(controller: CameraController) {
                 }
             }
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                Text(
-                    viewModel.roomId,
-                    style = MaterialTheme.typography.labelLarge,
-                    color = Color.White,
-                    modifier = Modifier
-                        .background(Color.Black.copy(alpha = 0.4f))
-                        .padding(horizontal = 10.dp, vertical = 4.dp),
-                )
+                AreaDropdown(viewModel)
                 FilterChip(
                     selected = viewModel.mode == AnalyzeMode.ANALYZE_MODE_DISCOVER,
                     onClick = { viewModel.mode = AnalyzeMode.ANALYZE_MODE_DISCOVER },
@@ -183,6 +186,11 @@ fun LaresApp(controller: CameraController) {
                     selected = viewModel.mode == AnalyzeMode.ANALYZE_MODE_DIFF,
                     onClick = { viewModel.mode = AnalyzeMode.ANALYZE_MODE_DIFF },
                     label = { Text("Diff") },
+                )
+                FilterChip(
+                    selected = viewModel.autoScan,
+                    onClick = { viewModel.autoScan = !viewModel.autoScan },
+                    label = { Text("Auto") },
                 )
             }
         }
@@ -229,7 +237,9 @@ fun LaresApp(controller: CameraController) {
                 onClick = { showChores = true },
                 modifier = Modifier.fillMaxWidth(),
             ) {
-                Text("Chores (${viewModel.chores.size})")
+                val count = viewModel.filteredChores.size
+                val total = viewModel.chores.size
+                Text(if (viewModel.showAllChores) "Chores ($total)" else "Chores ($count/$total)")
             }
         }
     }
@@ -258,14 +268,33 @@ fun LaresApp(controller: CameraController) {
                 modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp).padding(bottom = 24.dp),
                 verticalArrangement = Arrangement.spacedBy(8.dp),
             ) {
-                Text("Chores", style = MaterialTheme.typography.titleMedium)
-                if (viewModel.chores.isEmpty()) {
-                    Text("No chores yet. Scan or sweep the room.", style = MaterialTheme.typography.bodySmall)
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                ) {
+                    Text("Chores", style = MaterialTheme.typography.titleMedium)
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Text("All", style = MaterialTheme.typography.labelSmall, color = Color.Gray)
+                        Switch(
+                            checked = viewModel.showAllChores,
+                            onCheckedChange = { viewModel.showAllChores = it },
+                        )
+                    }
+                }
+                val display = viewModel.filteredChores
+                if (display.isEmpty()) {
+                    Text(
+                        if (viewModel.chores.isEmpty()) "No chores yet. Scan or sweep the room."
+                        else "All chores are expected here.",
+                        style = MaterialTheme.typography.bodySmall,
+                    )
                 }
                 LazyColumn(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                    items(viewModel.chores) { chore ->
+                    items(display) { chore ->
                         ChoreCard(
                             chore = chore,
+                            viewModel = viewModel,
                             onHow = { howChore = chore },
                             onToggle = { viewModel.setStatus(chore.id, it) },
                         )
@@ -274,6 +303,47 @@ fun LaresApp(controller: CameraController) {
             }
         }
     }
+}
+
+/** Dropdown for selecting the room area type. */
+@Composable
+private fun AreaDropdown(viewModel: MainViewModel) {
+    var expanded by remember { mutableStateOf(false) }
+    Box {
+        FilterChip(
+            selected = false,
+            onClick = { expanded = true },
+            label = { Text(viewModel.roomArea.displayName()) },
+        )
+        DropdownMenu(expanded = expanded, onDismissRequest = { expanded = false }) {
+            RoomArea.entries.filter { it != RoomArea.ROOM_AREA_UNSPECIFIED }.forEach { area ->
+                DropdownMenuItem(
+                    text = { Text(area.displayName()) },
+                    onClick = {
+                        viewModel.roomArea = area
+                        expanded = false
+                    },
+                )
+            }
+        }
+    }
+}
+
+/** Human-readable name for a room area. */
+private fun RoomArea.displayName(): String = when (this) {
+    RoomArea.ROOM_AREA_KITCHEN -> "Kitchen"
+    RoomArea.ROOM_AREA_BATHROOM -> "Bathroom"
+    RoomArea.ROOM_AREA_BEDROOM -> "Bedroom"
+    RoomArea.ROOM_AREA_LIVING_ROOM -> "Living Room"
+    RoomArea.ROOM_AREA_DINING_ROOM -> "Dining Room"
+    RoomArea.ROOM_AREA_OFFICE -> "Office"
+    RoomArea.ROOM_AREA_GARAGE -> "Garage"
+    RoomArea.ROOM_AREA_LAUNDRY -> "Laundry"
+    RoomArea.ROOM_AREA_HALLWAY -> "Hallway"
+    RoomArea.ROOM_AREA_KIDS_ROOM -> "Kids Room"
+    RoomArea.ROOM_AREA_PATIO -> "Patio"
+    RoomArea.ROOM_AREA_OTHER -> "Other"
+    else -> "Room"
 }
 
 /** Settings dialog: server URL, room, and reference description. */
@@ -327,37 +397,67 @@ private fun HowDialog(chore: ChoreEntity, onDismiss: () -> Unit, onSave: () -> U
     )
 }
 
-/** A single chore with a how-to and a done/restore toggle. */
+/** A single chore with thumbnail, how-to, expected toggle, and done/restore. */
 @Composable
 private fun ChoreCard(
     chore: ChoreEntity,
+    viewModel: MainViewModel,
     onHow: () -> Unit,
     onToggle: (ChoreStatus) -> Unit,
 ) {
     val done = chore.status == ChoreStatus.CHORE_STATUS_DONE ||
         chore.status == ChoreStatus.CHORE_STATUS_DISMISSED
+    val label = chore.target.trim().lowercase()
+    val isExpected = label in viewModel.expectedLabels
     Card(modifier = Modifier.fillMaxWidth()) {
-        Column(
+        Row(
             modifier = Modifier.fillMaxWidth().padding(12.dp),
-            verticalArrangement = Arrangement.spacedBy(8.dp),
+            horizontalArrangement = Arrangement.spacedBy(12.dp),
         ) {
-            Text(chore.action, style = MaterialTheme.typography.bodyLarge)
-            Text(
-                chore.subtasksList.joinToString(" → "),
-                style = MaterialTheme.typography.bodySmall,
-            )
-            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                OutlinedButton(onClick = onHow, modifier = Modifier.weight(1f)) {
-                    Text("How")
+            viewModel.choreThumbnails[chore.id]?.let { bmp ->
+                Image(
+                    bitmap = bmp.asImageBitmap(),
+                    contentDescription = chore.target,
+                    modifier = Modifier.size(64.dp),
+                    contentScale = ContentScale.Crop,
+                )
+            }
+            Column(modifier = Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                val idx = chore.objectIndex
+                val title = if (idx > 0) "[$idx] ${chore.action}" else chore.action
+                Text(title, style = MaterialTheme.typography.bodyLarge)
+                Text(
+                    chore.subtasksList.joinToString(" → "),
+                    style = MaterialTheme.typography.bodySmall,
+                )
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    OutlinedButton(onClick = onHow, modifier = Modifier.weight(1f)) {
+                        Text("How")
+                    }
+                    OutlinedButton(
+                        onClick = {
+                            onToggle(if (done) ChoreStatus.CHORE_STATUS_DISCOVERED else ChoreStatus.CHORE_STATUS_DONE)
+                        },
+                        modifier = Modifier.weight(1f),
+                    ) {
+                        Text(if (done) "Restore" else "Done")
+                    }
                 }
-                OutlinedButton(
-                    onClick = {
-                        onToggle(if (done) ChoreStatus.CHORE_STATUS_DISCOVERED else ChoreStatus.CHORE_STATUS_DONE)
+            }
+            // Mark-as-expected toggle on the right edge.
+            Column(
+                horizontalAlignment = Alignment.CenterHorizontally,
+                verticalArrangement = Arrangement.Center,
+                modifier = Modifier.padding(top = 4.dp),
+            ) {
+                Text("Expected", style = MaterialTheme.typography.labelSmall, color = Color.Gray)
+                Switch(
+                    checked = isExpected,
+                    onCheckedChange = {
+                        if (isExpected) viewModel.clearExpected(label)
+                        else viewModel.setExpected(label)
                     },
-                    modifier = Modifier.weight(1f),
-                ) {
-                    Text(if (done) "Restore" else "Done")
-                }
+                )
             }
         }
     }

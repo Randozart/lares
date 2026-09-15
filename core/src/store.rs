@@ -75,6 +75,13 @@ const DDL_FINGERPRINTS: &str = "CREATE TABLE IF NOT EXISTS room_fingerprints (
     captured_at_unix INTEGER NOT NULL
 )";
 
+/// DDL for the expected objects table.
+const DDL_EXPECTED: &str = "CREATE TABLE IF NOT EXISTS expected_objects (
+    room_id TEXT NOT NULL,
+    object_label TEXT NOT NULL,
+    PRIMARY KEY (room_id, object_label)
+)";
+
 impl Store {
     /// Open (creating if needed) the database under `data_dir`.
     pub async fn connect(data_dir: impl AsRef<Path>) -> Result<Self, StoreError> {
@@ -99,6 +106,7 @@ impl Store {
         self.create_table(DDL_REFERENCES).await?;
         self.create_table(DDL_LANDMARKS).await?;
         self.create_table(DDL_FINGERPRINTS).await?;
+        self.create_table(DDL_EXPECTED).await?;
         self.ensure_how_to_column().await?;
         Ok(())
     }
@@ -341,6 +349,42 @@ impl Store {
         .fetch_all(&self.pool)
         .await?;
         rows.iter().map(row_to_fingerprint).collect()
+    }
+
+    /// Mark an object label as expected in a room.
+    pub async fn add_expected(&self, room_id: &str, label: &str) -> Result<(), StoreError> {
+        sqlx::query(
+            "INSERT OR IGNORE INTO expected_objects (room_id, object_label) VALUES (?, ?)",
+        )
+        .bind(room_id)
+        .bind(label)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
+    /// Remove an expected object label from a room.
+    pub async fn remove_expected(&self, room_id: &str, label: &str) -> Result<(), StoreError> {
+        sqlx::query("DELETE FROM expected_objects WHERE room_id = ? AND object_label = ?")
+            .bind(room_id)
+            .bind(label)
+            .execute(&self.pool)
+            .await?;
+        Ok(())
+    }
+
+    /// List all expected object labels for a room.
+    pub async fn get_expected(&self, room_id: &str) -> Result<Vec<String>, StoreError> {
+        let rows = sqlx::query(
+            "SELECT object_label FROM expected_objects WHERE room_id = ? ORDER BY object_label",
+        )
+        .bind(room_id)
+        .fetch_all(&self.pool)
+        .await?;
+        rows.iter()
+            .map(|r| r.try_get("object_label"))
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(StoreError::Database)
     }
 }
 

@@ -55,21 +55,31 @@ pub fn diff_system_prompt() -> String {
 }
 
 /// User-facing instruction for a DISCOVER frame.
-pub fn discover_user_prompt() -> String {
-    "Analyze this frame and list every actionable chore.".to_string()
+pub fn discover_user_prompt(room_area: &str) -> String {
+    format!(
+        "Analyze this {room_area} and list every actionable chore. \
+         Assign each distinct physical object an object_index (1-based, \
+         stable across the scene)."
+    )
 }
 
 /// User-facing instruction for a DIFF pair.
-pub fn diff_user_prompt() -> String {
-    "Image A is the agreed target state. Image B is the current state. List the deltas."
-        .to_string()
+pub fn diff_user_prompt(room_area: &str) -> String {
+    format!(
+        "Image A is the agreed target state. Image B is the current {room_area}. \
+         List the deltas. Assign each distinct physical object an object_index \
+         (1-based, stable across the scene)."
+    )
 }
 
 /// User-facing instruction for a sweep.
-pub fn sweep_user_prompt() -> String {
-    "These frames are consecutive views of one room during a pan. List every "
-        .to_string()
-        + "actionable chore once, in the frame where it is clearest."
+pub fn sweep_user_prompt(room_area: &str) -> String {
+    format!(
+        "These frames are consecutive views of one {room_area} during a pan. \
+         List every actionable chore once, in the frame where it is clearest. \
+         Assign each distinct physical object an object_index (1-based, stable \
+         across the scene)."
+    )
 }
 
 /// JSON schema for a single chore entry.
@@ -90,7 +100,11 @@ fn chore_item_schema() -> Value {
             "how_to": {
                 "type": "array",
                 "items": { "type": "string" },
-                "description": "2-4 concrete physical steps, naming specific objects and destinations"
+                "description": "2-4 concrete physical steps, naming specific objects by their object_index"
+            },
+            "object_index": {
+                "type": "integer",
+                "description": "1-based index identifying this specific physical object in the scene"
             },
             "image": {
                 "type": "integer",

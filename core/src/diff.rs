@@ -21,10 +21,14 @@ const MAX_CHORES: usize = 6;
 ///
 /// Applies [`normalize_chore`], retention filters, near-duplicate collapsing,
 /// and caps the result at [`MAX_CHORES`] by descending confidence.
-pub fn postprocess(mut chores: Vec<ChoreEntity>, room_id: &str) -> Vec<ChoreEntity> {
+pub fn postprocess(
+    mut chores: Vec<ChoreEntity>,
+    room_id: &str,
+    room_area: i32,
+) -> Vec<ChoreEntity> {
     let now = now_unix();
     for chore in &mut chores {
-        normalize_chore(chore, room_id, now);
+        normalize_chore(chore, room_id, room_area, now);
     }
     chores.retain(keep_chore);
     let mut collapsed = collapse_near_duplicates(chores);
@@ -33,12 +37,15 @@ pub fn postprocess(mut chores: Vec<ChoreEntity>, room_id: &str) -> Vec<ChoreEnti
 }
 
 /// Normalize one chore in place: identity, room, status, box, subtasks, time.
-fn normalize_chore(chore: &mut ChoreEntity, room_id: &str, now: i64) {
+fn normalize_chore(chore: &mut ChoreEntity, room_id: &str, room_area: i32, now: i64) {
     if chore.id.is_empty() {
         chore.id = new_chore_id();
     }
     if chore.room_id.is_empty() {
         chore.room_id = room_id.to_string();
+    }
+    if chore.room_area == 0 {
+        chore.room_area = room_area;
     }
     if chore.status == ChoreStatus::Unspecified as i32 {
         chore.status = ChoreStatus::Discovered as i32;
@@ -128,7 +135,7 @@ mod tests {
 
     #[test]
     fn assigns_identity_and_room() {
-        let out = postprocess(vec![chore("socks", 0.9, Some(mid_box()))], "bedroom");
+        let out = postprocess(vec![chore("socks", 0.9, Some(mid_box()))], "bedroom", 0);
         assert_eq!(out.len(), 1);
         assert!(!out[0].id.is_empty());
         assert_eq!(out[0].room_id, "bedroom");
@@ -146,14 +153,14 @@ mod tests {
             c.action.clear();
             c
         };
-        let out = postprocess(vec![low_conf, degenerate, empty_action], "kitchen");
+        let out = postprocess(vec![low_conf, degenerate, empty_action], "kitchen", 0);
         assert!(out.is_empty());
     }
 
     #[test]
     fn clamps_out_of_range_boxes() {
         let mut c = chore("mess", 0.9, Some(BoundingBox { ymin: -50, xmin: 10, ymax: 2000, xmax: 500 }));
-        normalize_chore(&mut c, "room", 0);
+        normalize_chore(&mut c, "room", 0, 0);
         let box_ = c.r#box.unwrap();
         assert!(box_.ymin >= 0 && box_.ymax <= 1000);
     }
@@ -162,7 +169,7 @@ mod tests {
     fn collapses_near_duplicates_keeping_highest_confidence() {
         let a = chore("socks", 0.5, Some(mid_box()));
         let b = chore("socks", 0.95, Some(mid_box()));
-        let out = postprocess(vec![a, b], "bedroom");
+        let out = postprocess(vec![a, b], "bedroom", 0);
         assert_eq!(out.len(), 1);
         assert_eq!(out[0].confidence, 0.95);
     }
@@ -171,7 +178,7 @@ mod tests {
     fn keeps_distinct_targets_in_same_cell() {
         let socks = chore("socks", 0.9, Some(mid_box()));
         let mugs = chore("mugs", 0.9, Some(mid_box()));
-        let out = postprocess(vec![socks, mugs], "kitchen");
+        let out = postprocess(vec![socks, mugs], "kitchen", 0);
         assert_eq!(out.len(), 2);
     }
 }

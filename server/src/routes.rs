@@ -4,7 +4,7 @@ use axum::{
     extract::{DefaultBodyLimit, Path, Query, State},
     http::StatusCode,
     response::{IntoResponse, Response},
-    routing::{get, patch, post},
+    routing::{delete, get, patch, post},
     Json, Router,
 };
 
@@ -39,6 +39,14 @@ pub fn router(state: AppState) -> Router {
         .route(
             "/v1/rooms/{room_id}/fingerprint",
             get(get_fingerprints).post(set_fingerprint),
+        )
+        .route(
+            "/v1/rooms/{room_id}/expected",
+            get(list_expected).post(add_expected),
+        )
+        .route(
+            "/v1/rooms/{room_id}/expected/{label}",
+            delete(remove_expected),
         )
         // Phone captures are multi-megabyte JPEGs; the default 2MB body limit
         // rejects them. 32MB headroom covers even large reference frames.
@@ -78,7 +86,7 @@ async fn analyze(
         req.reference_jpeg = load_reference(&state, &req.room_id).await?;
     }
     let mut response = state.engine.analyze_scene(req.clone()).await?;
-    let chores = diff::postprocess(response.chores, &req.room_id);
+    let chores = diff::postprocess(response.chores, &req.room_id, req.room_area);
     state.store.upsert_chores(&chores).await?;
     if req.mode == AnalyzeMode::Discover as i32 && !response.landmarks.is_empty() {
         state.store.upsert_landmarks(&req.room_id, &response.landmarks).await?;
@@ -197,6 +205,50 @@ async fn get_fingerprints(
     };
     let fingerprints = state.store.get_fingerprints(&room_id, kind).await?;
     Ok(Json(ListFingerprintsResponse { fingerprints }))
+}
+
+/// A list of expected object labels.
+#[derive(Debug, serde::Serialize)]
+struct ExpectedResponse {
+    labels: Vec<String>,
+}
+
+/// Request body for adding an expected object.
+#[derive(Debug, serde::Deserialize)]
+struct AddExpectedRequest {
+    label: String,
+}
+
+/// List expected object labels for a room.
+async fn list_expected(
+    State(state): State<AppState>,
+    Path(room_id): Path<String>,
+) -> Result<Json<ExpectedResponse>, ApiError> {
+    let labels = state.store.get_expected(&room_id).await?;
+    Ok(Json(ExpectedResponse { labels }))
+}
+
+/// Add an expected object label to a room.
+async fn add_expected(
+    State(state): State<AppState>,
+    Path(room_id): Path<String>,
+    Json(req): Json<AddExpectedRequest>,
+) -> Result<StatusCode, ApiError> {
+    let label = req.label.trim().to_string();
+    if label.is_empty() {
+        return Err(ApiError::bad_request("label is required"));
+    }
+    state.store.add_expected(&room_id, &label).await?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+/// Remove an expected object label from a room.
+async fn remove_expected(
+    State(state): State<AppState>,
+    Path((room_id, label)): Path<(String, String)>,
+) -> Result<StatusCode, ApiError> {
+    state.store.remove_expected(&room_id, &label).await?;
+    Ok(StatusCode::NO_CONTENT)
 }
 
 /// Load the stored reference image for a room, if any.

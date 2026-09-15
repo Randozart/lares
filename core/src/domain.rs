@@ -4,7 +4,7 @@ pub use crate::lares::v1::{
     AnalyzeMode, AnalyzeSceneRequest, AnalyzeSceneResponse, BoundingBox, ChoreEntity,
     ChoreStatus, FingerprintKind, FingerprintRecord, IdleContext, Landmark, LandmarkList,
     ListChoresResponse, ListFingerprintsResponse, Nudge, NudgeRequest, NudgeResponse,
-    ReferenceState, SetChoreStatusRequest, SetFingerprintRequest, SetReferenceRequest,
+    ReferenceState, RoomArea, SetChoreStatusRequest, SetFingerprintRequest, SetReferenceRequest,
 };
 
 /// Lower bound of normalized box coordinates.
@@ -69,4 +69,23 @@ pub fn center_cell(b: &BoundingBox, cell: i32) -> (i32, i32) {
     let cx = (b.xmin + b.xmax) / 2;
     let size = cell.max(1);
     (cy / size, cx / size)
+}
+
+/// Human-readable display name for a room area.
+pub fn area_display_name(area: RoomArea) -> &'static str {
+    match area {
+        RoomArea::Kitchen => "kitchen",
+        RoomArea::Bathroom => "bathroom",
+        RoomArea::Bedroom => "bedroom",
+        RoomArea::LivingRoom => "living room",
+        RoomArea::DiningRoom => "dining room",
+        RoomArea::Office => "office",
+        RoomArea::Garage => "garage",
+        RoomArea::Laundry => "laundry",
+        RoomArea::Hallway => "hallway",
+        RoomArea::KidsRoom => "kids room",
+        RoomArea::Patio => "patio",
+        RoomArea::Other => "room",
+        _ => "room",
+    }
 }

@@ -12,6 +12,7 @@ import dev.randozart.lares.proto.Landmark
 import dev.randozart.lares.proto.LandmarkList
 import dev.randozart.lares.proto.ListChoresResponse
 import dev.randozart.lares.proto.ReferenceState
+import dev.randozart.lares.proto.RoomArea
 import dev.randozart.lares.proto.SetChoreStatusRequest
 import dev.randozart.lares.proto.SetFingerprintRequest
 import dev.randozart.lares.proto.SetReferenceRequest
@@ -45,11 +46,13 @@ class LaresClient {
         roomId: String,
         jpeg: ByteArray,
         mode: AnalyzeMode,
+        roomArea: RoomArea = RoomArea.ROOM_AREA_UNSPECIFIED,
     ): AnalyzeSceneResponse {
         val request = AnalyzeSceneRequest.newBuilder()
             .setRoomId(roomId)
             .setFrameJpeg(ByteString.copyFrom(jpeg))
             .setMode(mode)
+            .setRoomArea(roomArea)
             .build()
         val body = post("$baseUrl/v1/analyze", printer.print(request))
         val builder = AnalyzeSceneResponse.newBuilder()
@@ -58,10 +61,16 @@ class LaresClient {
     }
 
     /** Analyze a pan sweep of consecutive frames in a single request. */
-    fun analyzeSweep(baseUrl: String, roomId: String, jpegs: List<ByteArray>): AnalyzeSceneResponse {
+    fun analyzeSweep(
+        baseUrl: String,
+        roomId: String,
+        jpegs: List<ByteArray>,
+        roomArea: RoomArea = RoomArea.ROOM_AREA_UNSPECIFIED,
+    ): AnalyzeSceneResponse {
         val request = AnalyzeSceneRequest.newBuilder()
             .setRoomId(roomId)
             .setMode(AnalyzeMode.ANALYZE_MODE_DISCOVER)
+            .setRoomArea(roomArea)
         jpegs.forEach { request.addSweepJpegs(ByteString.copyFrom(it)) }
         val body = post("$baseUrl/v1/analyze", printer.print(request.build()))
         val builder = AnalyzeSceneResponse.newBuilder()
@@ -127,6 +136,24 @@ class LaresClient {
         send("$baseUrl/v1/rooms/$roomId/fingerprint", printer.print(request))
     }
 
+    /** List expected object labels for a room. */
+    fun listExpected(baseUrl: String, roomId: String): List<String> {
+        val json = get("$baseUrl/v1/rooms/$roomId/expected")
+        val root = com.google.gson.JsonParser.parseString(json).asJsonObject
+        return root.getAsJsonArray("labels").map { it.asString }
+    }
+
+    /** Mark an object label as expected in a room. */
+    fun addExpected(baseUrl: String, roomId: String, label: String) {
+        val body = """{"label":"${label.replace("\"", "\\\"")}"}"""
+        send("$baseUrl/v1/rooms/$roomId/expected", body)
+    }
+
+    /** Remove an expected object label from a room. */
+    fun removeExpected(baseUrl: String, roomId: String, label: String) {
+        delete("$baseUrl/v1/rooms/$roomId/expected/$label")
+    }
+
     /** POST a protojson body and return the raw response text. */
     private fun post(url: String, body: String): String {
         val request = Request.Builder()
@@ -156,6 +183,14 @@ class LaresClient {
         return http.newCall(request).execute().use { response ->
             check(response.isSuccessful) { "HTTP ${response.code}: ${response.body?.string()}" }
             response.body?.string() ?: ""
+        }
+    }
+
+    /** DELETE a URL and ignore the response body. */
+    private fun delete(url: String) {
+        val request = Request.Builder().url(url).delete().build()
+        http.newCall(request).execute().use { response ->
+            check(response.isSuccessful) { "HTTP ${response.code}: ${response.body?.string()}" }
         }
     }
 }

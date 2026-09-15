@@ -24,6 +24,7 @@ import dev.randozart.lares.proto.ChoreEntity
 import dev.randozart.lares.proto.ChoreStatus
 import dev.randozart.lares.proto.FingerprintKind
 import dev.randozart.lares.proto.Landmark
+import dev.randozart.lares.proto.RoomArea
 import dev.randozart.lares.tracking.TrackingEngine
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
@@ -52,6 +53,7 @@ class MainViewModel : ViewModel() {
 
     var serverUrl by mutableStateOf("http://100.111.244.0:8787")
     var roomId by mutableStateOf("kitchen")
+    var roomArea by mutableStateOf(RoomArea.ROOM_AREA_KITCHEN)
     var description by mutableStateOf("counters clear, room tidy")
     var mode by mutableStateOf(AnalyzeMode.ANALYZE_MODE_DISCOVER)
 
@@ -61,10 +63,21 @@ class MainViewModel : ViewModel() {
     var busy by mutableStateOf(false)
     var scanning by mutableStateOf(false)
     var sweeping by mutableStateOf(false)
-    var statusLine by mutableStateOf("idle")
+    var autoScan by mutableStateOf(false)
+    var statusLine by mutableStateOf("ready — tap Scan or Sweep")
+
+    /** Expected object labels for the current room, synced from the server. */
+    var expectedLabels by mutableStateOf<Set<String>>(emptySet())
+        private set
+
+    /** When true, all chores are shown; when false, expected ones are suppressed. */
+    var showAllChores by mutableStateOf(false)
 
     /** Chore lookup by tracked-box id for overlay labels. */
     val choresById = mutableStateMapOf<String, ChoreEntity>()
+
+    /** Inline-cropped thumbnails for each chore, keyed by chore id. */
+    val choreThumbnails = mutableStateMapOf<String, Bitmap>()
 
     private var lastFingerprint: ByteArray? = null
     private var lastScanAt = 0L
@@ -84,10 +97,28 @@ class MainViewModel : ViewModel() {
     var lastFrameBitmap: Bitmap? = null
         private set
 
+    /** Dimensions of the camera analysis frame (post-rotation), for overlay mapping. */
+    var lastFrameWidth = 0
+        private set
+    var lastFrameHeight = 0
+        private set
+
+    /** Chores filtered by expected status. Shows all when [showAllChores] is true. */
+    val filteredChores: List<ChoreEntity>
+        get() {
+            if (showAllChores) return chores
+            return chores.filter { chore ->
+                val label = chore.target.trim().lowercase()
+                label !in expectedLabels
+            }
+        }
+
     /** Feed a CameraX analysis frame into the tracker. */
     fun onAnalysisFrame(proxy: ImageProxy) {
         try {
             val gray = proxy.toGrayFrame()
+            lastFrameWidth = gray.width.toInt()
+            lastFrameHeight = gray.height.toInt()
             engine.onFrame(gray)
             trackedBoxes = engine.boxes
             frameCount += 1
@@ -223,12 +254,14 @@ class MainViewModel : ViewModel() {
             withContext(Dispatchers.IO) {
                 val upload = downscaleJpeg(jpeg, 1280)
                 lastFrameBitmap = BitmapFactory.decodeByteArray(upload, 0, upload.size)
-                runCatching { client.analyze(serverUrl, roomId, upload, mode) }
+                runCatching { client.analyze(serverUrl, roomId, upload, mode, roomArea) }
                     .onSuccess {
                         val responseChores = it.choresList
                         chores = responseChores
                         rebuildChoreIndex(responseChores)
+                        buildThumbnails(lastFrameBitmap, responseChores)
                         landmarks = it.landmarksList
+                        loadExpected()
                         if (anchor != null) {
                             engine.anchor(anchor, choreBoxes(responseChores))
                             lastFingerprint = engine.fingerprint(anchor)
@@ -264,6 +297,65 @@ class MainViewModel : ViewModel() {
         items.forEach { choresById[it.id] = it }
     }
 
+    /** Crop each chore's bounding box from the frame into a 128x128 thumbnail. */
+    private fun buildThumbnails(bitmap: Bitmap?, items: List<ChoreEntity>) {
+        choreThumbnails.clear()
+        if (bitmap == null) return
+        val w = bitmap.width
+        val h = bitmap.height
+        for (chore in items) {
+            if (!chore.hasBox()) continue
+            val box = chore.box
+            val l = (box.xmin / 1000f * w).toInt().coerceIn(0, w)
+            val t = (box.ymin / 1000f * h).toInt().coerceIn(0, h)
+            val r = (box.xmax / 1000f * w).toInt().coerceIn(0, w)
+            val b = (box.ymax / 1000f * h).toInt().coerceIn(0, h)
+            if (r > l && b > t) {
+                val crop = Bitmap.createBitmap(bitmap, l, t, r - l, b - t)
+                choreThumbnails[chore.id] = Bitmap.createScaledBitmap(crop, 128, 128, true)
+            }
+        }
+    }
+
+    /** Fetch expected object labels for the current room from the server. */
+    private fun loadExpected() {
+        viewModelScope.launch {
+            withContext(Dispatchers.IO) {
+                runCatching { client.listExpected(serverUrl, roomId) }
+                    .onSuccess { expectedLabels = it.toSet() }
+                    .onFailure { }
+            }
+        }
+    }
+
+    /** Mark an object label as expected in the current room. */
+    fun setExpected(label: String) {
+        viewModelScope.launch {
+            withContext(Dispatchers.IO) {
+                runCatching { client.addExpected(serverUrl, roomId, label) }
+                    .onSuccess {
+                        expectedLabels = expectedLabels + label
+                        statusLine = "\"$label\" marked as expected"
+                    }
+                    .onFailure { statusLine = "error: ${it.message}" }
+            }
+        }
+    }
+
+    /** Remove an expected object label from the current room. */
+    fun clearExpected(label: String) {
+        viewModelScope.launch {
+            withContext(Dispatchers.IO) {
+                runCatching { client.removeExpected(serverUrl, roomId, label) }
+                    .onSuccess {
+                        expectedLabels = expectedLabels - label
+                        statusLine = "\"$label\" no longer expected"
+                    }
+                    .onFailure { statusLine = "error: ${it.message}" }
+            }
+        }
+    }
+
     /** Convert contract chore boxes into tracker boxes. */
     private fun choreBoxes(items: List<ChoreEntity>): List<TrackedBox> =
         items.mapNotNull { chore ->
@@ -287,7 +379,7 @@ class MainViewModel : ViewModel() {
             busy = true
             statusLine = "analyzing sweep..."
             withContext(Dispatchers.IO) {
-                runCatching { client.analyzeSweep(serverUrl, roomId, frames) }
+                runCatching { client.analyzeSweep(serverUrl, roomId, frames, roomArea) }
                     .onSuccess {
                         val items = it.choresList
                         chores = items
@@ -295,6 +387,8 @@ class MainViewModel : ViewModel() {
                         landmarks = it.landmarksList
                         lastFrameBitmap = frames.lastOrNull()
                             ?.let { b -> BitmapFactory.decodeByteArray(b, 0, b.size) }
+                        buildThumbnails(lastFrameBitmap, items)
+                        loadExpected()
                         val anchorGray = anchors.lastOrNull()
                         if (anchorGray != null) {
                             engine.anchor(anchorGray, choreBoxes(items))
