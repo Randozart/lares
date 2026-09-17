@@ -20,11 +20,14 @@ val HudGreen = Color(0xFF33FF33)
 /** Absolute black: unpowered OLED pixels. */
 val HudBlack = Color(0xFF000000)
 
-/** Bracket / leader stroke width. */
-val HudStroke: Dp = 2.dp
+/** Bracket / leader stroke width: hairline, Ace-Combat-style. */
+val HudStroke: Dp = 1.dp
 
 /** Fine stroke width for leaders and dim marks. */
 val HudFineStroke: Dp = 1.dp
+
+/** Corner radius for HUD control frames: nearly square. */
+val HudCorner: Dp = 2.dp
 
 /** Share Tech Mono (SIL OFL), vendored in res/font. */
 val HudFont = FontFamily(

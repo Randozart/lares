@@ -15,6 +15,7 @@ import androidx.compose.animation.core.Animatable
 import androidx.compose.animation.core.tween
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.layout.Arrangement
@@ -25,7 +26,12 @@ import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.navigationBarsPadding
+import androidx.compose.foundation.layout.statusBarsPadding
+import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.heightIn
+import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
@@ -42,6 +48,7 @@ import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.FilterChip
+import androidx.compose.material3.FilterChipDefaults
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
@@ -64,6 +71,7 @@ import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.input.pointer.pointerInput
@@ -96,7 +104,10 @@ import dev.randozart.lares.ui.hud.KillEffect
 import dev.randozart.lares.ui.hud.hud
 import dev.randozart.lares.ui.hud.hudColorScheme
 import dev.randozart.lares.ui.hud.hudPalette
+import dev.randozart.lares.ui.hud.HudButton
+import dev.randozart.lares.ui.hud.HudCorner
 import dev.randozart.lares.ui.hud.HudOverlay
+import dev.randozart.lares.ui.hud.HudToggle
 import androidx.work.ExistingPeriodicWorkPolicy
 import androidx.work.PeriodicWorkRequestBuilder
 import androidx.work.WorkManager
@@ -369,6 +380,15 @@ fun batteryPercent(context: Context): Int {
     return level * 100 / scale
 }
 
+/** Chip colors tuned for the HUD: amber labels, amber fill when selected. */
+@Composable
+private fun hudChipColors(palette: HudPalette) = FilterChipDefaults.filterChipColors(
+    containerColor = Color.Transparent,
+    labelColor = palette.primary,
+    selectedContainerColor = palette.primary,
+    selectedLabelColor = HudBlack,
+)
+
 /** All fixed HUD chrome: top telemetry, mission board, bottom controls. */
 @Composable
 private fun HudChrome(
@@ -388,19 +408,44 @@ private fun HudChrome(
     val battery = remember { batteryPercent(context) }
     val processing = viewModel.busy || viewModel.scanning || viewModel.sweeping
     Box(Modifier.fillMaxSize()) {
+        // Readability scrims: dark gradients behind top and bottom chrome.
+        Box(
+            Modifier
+                .align(Alignment.TopCenter)
+                .fillMaxWidth()
+                .height(170.dp)
+                .background(
+                    Brush.verticalGradient(
+                        listOf(Color(0xCC000000), Color(0x00000000)),
+                    ),
+                ),
+        )
+        Box(
+            Modifier
+                .align(Alignment.BottomCenter)
+                .fillMaxWidth()
+                .height(190.dp)
+                .background(
+                    Brush.verticalGradient(
+                        listOf(Color(0x00000000), Color(0xCC000000)),
+                    ),
+                ),
+        )
         Column(
             modifier = Modifier
                 .align(Alignment.TopCenter)
                 .fillMaxWidth()
-                .padding(horizontal = 10.dp, vertical = 8.dp),
-            verticalArrangement = Arrangement.spacedBy(6.dp),
+                .statusBarsPadding()
+                .padding(horizontal = 8.dp, vertical = 6.dp),
+            verticalArrangement = Arrangement.spacedBy(4.dp),
         ) {
             Row(modifier = Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
                 Text(
                     "SYS: NOMINAL // TGT: ${viewModel.clutterIndex / 7}" +
                         " // RADS: ${viewModel.clutterIndex}% // BAT: $battery%",
                     fontFamily = HudFont,
-                    fontSize = 12.sp,
+                    fontSize = 10.sp,
+                    letterSpacing = 0.1.sp,
                     color = palette.primary,
                     modifier = Modifier.weight(1f),
                 )
@@ -418,29 +463,22 @@ private fun HudChrome(
             Text(
                 hud(viewModel.statusLine),
                 fontFamily = HudFont,
-                fontSize = 11.sp,
+                fontSize = 9.sp,
+                letterSpacing = 0.1.sp,
                 color = palette.dim,
                 modifier = Modifier.fillMaxWidth(),
             )
-            Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-                AreaDropdown(viewModel)
-                FilterChip(
-                    selected = viewModel.mode == AnalyzeMode.ANALYZE_MODE_DISCOVER,
-                    onClick = { viewModel.mode = AnalyzeMode.ANALYZE_MODE_DISCOVER },
-                    label = { Text(hud("A/G"), fontFamily = HudFont) },
-                )
-                FilterChip(
-                    selected = viewModel.mode == AnalyzeMode.ANALYZE_MODE_DIFF,
-                    onClick = { viewModel.mode = AnalyzeMode.ANALYZE_MODE_DIFF },
-                    label = { Text(hud("DIFF"), fontFamily = HudFont) },
-                )
-                FilterChip(
-                    selected = viewModel.autoScan,
-                    onClick = { viewModel.autoScan = !viewModel.autoScan },
-                    label = {
-                        Text(hud(if (viewModel.autoScan) "ARM: ARMED" else "ARM: SAFE"), fontFamily = HudFont)
-                    },
-                )
+            Row(horizontalArrangement = Arrangement.spacedBy(5.dp)) {
+                AreaDropdown(viewModel, palette)
+                HudToggle("A/G", viewModel.mode == AnalyzeMode.ANALYZE_MODE_DISCOVER, palette) {
+                    viewModel.mode = AnalyzeMode.ANALYZE_MODE_DISCOVER
+                }
+                HudToggle("DIFF", viewModel.mode == AnalyzeMode.ANALYZE_MODE_DIFF, palette) {
+                    viewModel.mode = AnalyzeMode.ANALYZE_MODE_DIFF
+                }
+                HudToggle(if (viewModel.autoScan) "ARM: ARMED" else "ARM: SAFE", viewModel.autoScan, palette) {
+                    viewModel.autoScan = !viewModel.autoScan
+                }
             }
             BriefingCard(items = viewModel.briefingItems, onExpand = onShowBriefing)
         }
@@ -451,7 +489,7 @@ private fun HudChrome(
                 Text(
                     hud("ENGAGED: ${chore.action} — TAP TO NEUTRALIZE"),
                     fontFamily = HudFont,
-                    fontSize = 13.sp,
+                    fontSize = 11.sp,
                     color = palette.primary,
                     modifier = Modifier
                         .align(Alignment.Center)
@@ -465,38 +503,45 @@ private fun HudChrome(
             modifier = Modifier
                 .align(Alignment.BottomCenter)
                 .fillMaxWidth()
-                .padding(16.dp),
-            verticalArrangement = Arrangement.spacedBy(8.dp),
+                .navigationBarsPadding()
+                .padding(horizontal = 12.dp, vertical = 12.dp),
+            verticalArrangement = Arrangement.spacedBy(6.dp),
         ) {
-            Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                Button(
-                    onClick = onSweep,
+            Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                HudButton(
+                    if (viewModel.sweeping) "STOP" else "SWEEP",
+                    palette,
+                    onSweep,
+                    enabled = hasCamera && !viewModel.busy,
+                    filled = true,
+                    modifier = Modifier.weight(1f),
+                )
+                HudButton(
+                    "SCAN",
+                    palette,
+                    onScan,
+                    enabled = hasCamera && !viewModel.busy,
+                    filled = true,
+                    modifier = Modifier.weight(1f),
+                )
+                HudButton(
+                    "REF",
+                    palette,
+                    onReference,
                     enabled = hasCamera && !viewModel.busy,
                     modifier = Modifier.weight(1f),
-                ) { Text(hud(if (viewModel.sweeping) "STOP" else "SWEEP"), fontFamily = HudFont) }
-                Button(
-                    onClick = onScan,
-                    enabled = hasCamera && !viewModel.busy,
-                    modifier = Modifier.weight(1f),
-                ) { Text(hud("SCAN"), fontFamily = HudFont) }
-                OutlinedButton(
-                    onClick = onReference,
-                    enabled = hasCamera && !viewModel.busy,
-                    modifier = Modifier.weight(1f),
-                ) { Text(hud("REF"), fontFamily = HudFont) }
+                )
             }
-            Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                OutlinedButton(onClick = onShowChores, modifier = Modifier.weight(1f)) {
-                    val count = viewModel.filteredChores.size
-                    val total = viewModel.chores.size
-                    Text(
-                        hud(if (viewModel.showAllChores) "REGISTRY ($total)" else "REGISTRY ($count/$total)"),
-                        fontFamily = HudFont,
-                    )
-                }
-                OutlinedButton(onClick = onShowPeople, modifier = Modifier.weight(1f)) {
-                    Text(hud("CONTACTS (${viewModel.people.size})"), fontFamily = HudFont)
-                }
+            Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                val count = viewModel.filteredChores.size
+                val total = viewModel.chores.size
+                HudButton(
+                    "REG $count/$total",
+                    palette,
+                    onShowChores,
+                    modifier = Modifier.weight(1f),
+                )
+                HudButton("CONT ${viewModel.people.size}", palette, onShowPeople, modifier = Modifier.weight(1f))
             }
         }
     }
@@ -564,14 +609,12 @@ private fun ChoreSheetContent(viewModel: MainViewModel, onHow: (ChoreEntity) -> 
 
 /** Dropdown for selecting the room area type. */
 @Composable
-private fun AreaDropdown(viewModel: MainViewModel) {
+private fun AreaDropdown(viewModel: MainViewModel, palette: HudPalette) {
     var expanded by remember { mutableStateOf(false) }
     Box {
-        FilterChip(
-            selected = false,
-            onClick = { expanded = true },
-            label = { Text(viewModel.roomArea.displayName()) },
-        )
+        HudToggle(viewModel.roomArea.displayName().replace(" ", "-"), false, palette) {
+            expanded = true
+        }
         DropdownMenu(expanded = expanded, onDismissRequest = { expanded = false }) {
             RoomArea.entries.filter { it != RoomArea.ROOM_AREA_UNSPECIFIED }.forEach { area ->
                 DropdownMenuItem(
@@ -741,38 +784,39 @@ private fun BriefingCard(items: List<BriefingItem>, onExpand: () -> Unit) {
         modifier = Modifier
             .fillMaxWidth()
             .clickable { onExpand() },
+        shape = RoundedCornerShape(HudCorner),
         colors = CardDefaults.cardColors(
-            containerColor = Color(0x8D000000),
+            containerColor = Color(0xA6000000),
         ),
     ) {
         Column(
             modifier = Modifier
                 .fillMaxWidth()
-                .padding(start = 12.dp, end = 12.dp, top = 8.dp, bottom = 8.dp)
-                .background(
-                    Color.Transparent,
-                ),
-            verticalArrangement = Arrangement.spacedBy(2.dp),
+                .padding(horizontal = 10.dp, vertical = 6.dp),
+            verticalArrangement = Arrangement.spacedBy(1.dp),
         ) {
             Text(
                 hud("MISSION BOARD"),
                 fontFamily = HudFont,
-                fontSize = 10.sp,
+                fontSize = 9.sp,
                 letterSpacing = 0.15.sp,
-                modifier = Modifier.padding(bottom = 2.dp),
+                color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.7f),
+                modifier = Modifier.padding(bottom = 1.dp),
             )
             items.take(3).forEach { item ->
                 Text(
                     hud(BriefingFormat.format(item)),
                     fontFamily = HudFont,
-                    fontSize = 12.sp,
+                    fontSize = 11.sp,
+                    letterSpacing = 0.08.sp,
                 )
             }
             if (items.size > 3) {
                 Text(
                     hud("+${items.size - 3} more — tap to see all"),
                     fontFamily = HudFont,
-                    fontSize = 10.sp,
+                    fontSize = 9.sp,
+                    color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.6f),
                 )
             }
         }

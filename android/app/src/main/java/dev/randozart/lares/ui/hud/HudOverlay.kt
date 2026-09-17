@@ -53,6 +53,7 @@ fun HudOverlay(
     Canvas(modifier = modifier) {
         val transform = hudTransform(size.width, size.height, frameW, frameH)
         val killId = killEffect?.choreId
+        drawBoresight(palette.dim)
         boxes.forEach { box ->
             val chore = choresById[box.id] ?: return@forEach
             // Done chores leave the overlay; the kill effect draws instead.
@@ -86,9 +87,20 @@ fun HudOverlay(
     }
 }
 
+/** Draw the center boresight cross: aim reference when nothing is locked. */
+private fun DrawScope.drawBoresight(color: Color) {
+    val c = Offset(size.width / 2f, size.height / 2f)
+    val arm = 10.dp.toPx()
+    val gap = 3.dp.toPx()
+    drawLine(color, Offset(c.x - arm, c.y), Offset(c.x - gap, c.y), strokeWidth = HudFineStroke.toPx())
+    drawLine(color, Offset(c.x + gap, c.y), Offset(c.x + arm, c.y), strokeWidth = HudFineStroke.toPx())
+    drawLine(color, Offset(c.x, c.y - arm), Offset(c.x, c.y - gap), strokeWidth = HudFineStroke.toPx())
+    drawLine(color, Offset(c.x, c.y + gap), Offset(c.x, c.y + arm), strokeWidth = HudFineStroke.toPx())
+}
+
 /** Draw one target: corner brackets plus a centroid diamond. */
 private fun DrawScope.drawDesignator(rect: androidx.compose.ui.geometry.Rect, color: Color, solid: Boolean, pulse: Boolean) {
-    val arm = (rect.minDimension * 0.25f).coerceAtMost(28.dp.toPx()).coerceAtLeast(10.dp.toPx())
+    val arm = (rect.minDimension * 0.14f).coerceAtMost(18.dp.toPx()).coerceAtLeast(7.dp.toPx())
     val stroke = HudStroke.toPx()
     val inset = if (pulse) {
         2.dp.toPx() * (1f + 0.06f * kotlin.math.sin(System.nanoTime() / 100_000_000.0).toFloat())
@@ -108,7 +120,7 @@ private fun DrawScope.drawDesignator(rect: androidx.compose.ui.geometry.Rect, co
     drawLine(color, Offset(l, b), Offset(l, b - arm), strokeWidth = stroke)
     drawLine(color, Offset(r, b), Offset(r - arm, b), strokeWidth = stroke)
     drawLine(color, Offset(r, b), Offset(r, b - arm), strokeWidth = stroke)
-    drawDiamond(rect.center, arm * 0.35f, color)
+    drawDiamond(rect.center, arm * 0.28f, color)
 }
 
 /** Draw the centroid diamond marker. */
@@ -143,9 +155,9 @@ private fun DrawScope.drawDataBlock(
     drawLine(color, anchor, lineEnd, strokeWidth = HudFineStroke.toPx())
     val style = TextStyle(
         fontFamily = HudFont,
-        fontSize = 11.sp,
+        fontSize = 9.sp,
         color = color,
-        letterSpacing = 0.08.sp,
+        letterSpacing = 0.1.sp,
     )
     val est = chore.estimatedSeconds.takeIf { it > 0 } ?: 30
     val lines = buildList {
@@ -154,19 +166,19 @@ private fun DrawScope.drawDataBlock(
         add("EST: %02d:%02d".format(est / 60, est % 60))
         if (engaged) add("LOCK: SOLID")
     }
-    var y = lineEnd.y - lines.size * 14.dp.toPx() / 2f
+    var y = lineEnd.y - lines.size * 12.dp.toPx() / 2f
     val blockX = if (blockOnRight) lineEnd.x + 4.dp.toPx() else lineEnd.x - 4.dp.toPx()
     lines.forEach { line ->
         val measured = textMeasurer.measure(line, style)
         val x = if (blockOnRight) blockX else blockX - measured.size.width
         // Backing rect for readability over the camera feed.
         drawRect(
-            color = Color(0x99000000),
-            topLeft = Offset(x - 2.dp.toPx(), y - 2.dp.toPx()),
-            size = Size(measured.size.width + 4.dp.toPx(), measured.size.height + 3.dp.toPx()),
+            color = Color(0x66000000),
+            topLeft = Offset(x - 2.dp.toPx(), y - 1.dp.toPx()),
+            size = Size(measured.size.width + 4.dp.toPx(), measured.size.height + 2.dp.toPx()),
         )
         drawText(measured, topLeft = Offset(x, y))
-        y += measured.size.height + 2.dp.toPx()
+        y += measured.size.height + 1.dp.toPx()
     }
 }
 
@@ -188,7 +200,7 @@ private fun DrawScope.drawKill(
     drawDesignator(collapse, flash, solid = true, pulse = false)
     val style = TextStyle(
         fontFamily = HudFont,
-        fontSize = 13.sp,
+        fontSize = 11.sp,
         color = palette.primary,
     )
     val splash = "SPLASH 1 // ${effect.target.uppercase()} NEUTRALIZED"
@@ -219,7 +231,7 @@ private fun DrawScope.drawNavAid(
         size = Size(rect.width, rect.height),
         style = Stroke(width = HudFineStroke.toPx(), pathEffect = dashed),
     )
-    val style = TextStyle(fontFamily = HudFont, fontSize = 10.sp, color = color)
+    val style = TextStyle(fontFamily = HudFont, fontSize = 9.sp, color = color)
     val measured = textMeasurer.measure("NAV AID: ${label.uppercase()}", style)
     drawText(measured, topLeft = Offset(rect.left + 4.dp.toPx(), rect.top + 4.dp.toPx()))
 }
