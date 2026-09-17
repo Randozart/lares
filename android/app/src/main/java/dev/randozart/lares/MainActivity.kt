@@ -203,6 +203,7 @@ fun LaresApp(controller: CameraController) {
 
     LaunchedEffect(controller) {
         controller.analysisCallback = { viewModel.onAnalysisFrame(it) }
+        controller.probeTorch()
     }
 
     val settleDetector = remember {
@@ -284,6 +285,12 @@ fun LaresApp(controller: CameraController) {
                 onScan = { viewModel.captureAndAnalyze(controller, bypassGates = true) },
                 onReference = { viewModel.captureReference(controller) },
                 onLocate = { viewModel.inferRoom(controller) },
+                onTorch = { controller.cycleTorch() },
+                torchLabel = when (controller.torchState) {
+                    0 -> "LT: OFF"
+                    1 -> "LT: LO"
+                    else -> "LT: MAX"
+                },
                 hasCamera = hasCamera,
                 onHow = { howChore = it },
             )
@@ -390,6 +397,8 @@ private fun HudChrome(
     onScan: () -> Unit,
     onReference: () -> Unit,
     onLocate: () -> Unit,
+    onTorch: () -> Unit,
+    torchLabel: String,
     hasCamera: Boolean,
     onHow: (ChoreEntity) -> Unit,
 ) {
@@ -542,6 +551,12 @@ private fun HudChrome(
                     palette,
                     onLocate,
                     enabled = hasCamera && !viewModel.busy,
+                    modifier = Modifier.weight(1f),
+                )
+                HudButton(
+                    torchLabel,
+                    palette,
+                    onTorch,
                     modifier = Modifier.weight(1f),
                 )
             }

@@ -2,6 +2,11 @@ package dev.randozart.lares.capture
 
 import android.content.Context
 import android.util.Log
+import android.hardware.camera2.CameraCharacteristics
+import android.hardware.camera2.CameraManager
+import androidx.camera.core.Camera
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.setValue
 import androidx.camera.core.CameraSelector
 import androidx.camera.core.ImageAnalysis
 import androidx.camera.core.ImageCapture
@@ -22,6 +27,7 @@ import java.util.concurrent.Executors
  */
 class CameraController(private val context: Context) {
     private var imageCapture: ImageCapture? = null
+    private var camera: Camera? = null
     private val analysisExecutor: ExecutorService = Executors.newSingleThreadExecutor()
 
     /** The preview surface, wired during composition. */
@@ -69,7 +75,7 @@ class CameraController(private val context: Context) {
                 }
 
             provider.unbindAll()
-            provider.bindToLifecycle(
+            camera = provider.bindToLifecycle(
                 lifecycleOwner,
                 CameraSelector.DEFAULT_BACK_CAMERA,
                 preview,
@@ -78,6 +84,72 @@ class CameraController(private val context: Context) {
             )
             Log.d("LaresCam", "bound preview+capture+analysis (default resolutions)")
         }, ContextCompat.getMainExecutor(context))
+    }
+
+    /** Torch state: 0 = off, 1 = low, 2 = max. Low exists only when throttleable. */
+    var torchState by androidx.compose.runtime.mutableIntStateOf(0)
+        private set
+
+    /** Whether the flash hardware supports brightness levels. */
+    var torchThrottleable by androidx.compose.runtime.mutableStateOf(false)
+        private set
+
+    private var strengthMax = 1
+
+    /** Probe flash capabilities for the back camera. */
+    fun probeTorch() {
+        runCatching {
+            val manager = context.getSystemService(Context.CAMERA_SERVICE) as CameraManager
+            val id = manager.cameraIdList.firstOrNull { cid ->
+                manager.getCameraCharacteristics(cid)
+                    .get(CameraCharacteristics.LENS_FACING) ==
+                    CameraCharacteristics.LENS_FACING_BACK
+            } ?: return
+            val characteristics = manager.getCameraCharacteristics(id)
+            val max = characteristics.get(
+                CameraCharacteristics.FLASH_INFO_STRENGTH_MAXIMUM_LEVEL,
+            ) ?: 1
+            strengthMax = max
+            torchThrottleable = max > 1
+        }
+    }
+
+    /** Cycle torch OFF -> (LOW) -> MAX -> OFF. */
+    fun cycleTorch() {
+        val next = when {
+            torchState == 0 -> if (torchThrottleable) 1 else 2
+            torchState == 1 -> 2
+            else -> 0
+        }
+        applyTorch(next)
+    }
+
+    /** Apply a torch level through the camera, falling back to CameraX torch. */
+    private fun applyTorch(state: Int) {
+        val flashOn = state > 0
+        var applied = false
+        runCatching {
+            val manager = context.getSystemService(Context.CAMERA_SERVICE) as CameraManager
+            val id = manager.cameraIdList.firstOrNull { cid ->
+                manager.getCameraCharacteristics(cid)
+                    .get(CameraCharacteristics.LENS_FACING) ==
+                    CameraCharacteristics.LENS_FACING_BACK
+            } ?: return
+            when {
+                state == 0 -> manager.setTorchMode(id, false)
+                strengthMax > 1 ->
+                    manager.turnOnTorchWithStrengthLevel(
+                        id,
+                        if (state == 1) 1 else strengthMax,
+                    )
+                else -> manager.setTorchMode(id, true)
+            }
+            applied = true
+        }
+        if (!applied) {
+            camera?.cameraControl?.enableTorch(flashOn)
+        }
+        torchState = state
     }
 
     /** Capture a JPEG frame and hand the bytes to [onResult] on the main thread. */
