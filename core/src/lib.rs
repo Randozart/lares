@@ -20,9 +20,11 @@ pub mod lares {
     }
 }
 
+pub mod briefing;
 pub mod diff;
 pub mod domain;
 pub mod engine;
+pub mod ics;
 pub mod nudge;
 pub mod prompt;
 pub mod store;

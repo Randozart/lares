@@ -21,6 +21,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             "lares/v1/chore.proto",
             "lares/v1/inference.proto",
             "lares/v1/nudge.proto",
+            "lares/v1/people.proto",
         ],
         &[proto_root],
     )?;

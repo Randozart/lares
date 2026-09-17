@@ -11,7 +11,7 @@ use sqlx::{Row, SqlitePool};
 
 use crate::domain::{
     now_unix, BoundingBox, ChoreEntity, ChoreStatus, FingerprintKind, FingerprintRecord, Landmark,
-    ReferenceState,
+    Occasion, Person, ReferenceState,
 };
 
 /// Errors produced by the persistence layer.
@@ -46,7 +46,9 @@ const DDL_CHORES: &str = "CREATE TABLE IF NOT EXISTS chores (
     confidence REAL NOT NULL,
     subtasks TEXT NOT NULL,
     updated_at INTEGER NOT NULL,
-    how_to TEXT NOT NULL DEFAULT ''
+    how_to TEXT NOT NULL DEFAULT '',
+    due_at INTEGER,
+    kind INTEGER NOT NULL DEFAULT 0
 )";
 
 /// DDL for the room references table.
@@ -82,6 +84,29 @@ const DDL_EXPECTED: &str = "CREATE TABLE IF NOT EXISTS expected_objects (
     PRIMARY KEY (room_id, object_label)
 )";
 
+/// DDL for the people table.
+const DDL_PEOPLE: &str = "CREATE TABLE IF NOT EXISTS people (
+    id TEXT PRIMARY KEY,
+    name TEXT NOT NULL,
+    notes TEXT NOT NULL DEFAULT ''
+)";
+
+/// DDL for the occasions table.
+const DDL_OCCASIONS: &str = "CREATE TABLE IF NOT EXISTS occasions (
+    id TEXT PRIMARY KEY,
+    person_id TEXT NOT NULL DEFAULT '',
+    title TEXT NOT NULL,
+    date TEXT NOT NULL,
+    kind INTEGER NOT NULL,
+    notes TEXT NOT NULL DEFAULT ''
+)";
+
+/// DDL for the calendar sources table.
+const DDL_CALENDAR_SOURCES: &str = "CREATE TABLE IF NOT EXISTS calendar_sources (
+    url TEXT PRIMARY KEY,
+    last_synced_unix INTEGER NOT NULL
+)";
+
 impl Store {
     /// Open (creating if needed) the database under `data_dir`.
     pub async fn connect(data_dir: impl AsRef<Path>) -> Result<Self, StoreError> {
@@ -107,7 +132,11 @@ impl Store {
         self.create_table(DDL_LANDMARKS).await?;
         self.create_table(DDL_FINGERPRINTS).await?;
         self.create_table(DDL_EXPECTED).await?;
+        self.create_table(DDL_PEOPLE).await?;
+        self.create_table(DDL_OCCASIONS).await?;
+        self.create_table(DDL_CALENDAR_SOURCES).await?;
         self.ensure_how_to_column().await?;
+        self.ensure_chores_phase_h_columns().await?;
         Ok(())
     }
 
@@ -127,6 +156,29 @@ impl Store {
         Ok(())
     }
 
+    /// Add `due_at` and `kind` columns for manual TASK chores.
+    async fn ensure_chores_phase_h_columns(&self) -> Result<(), StoreError> {
+        let rows = sqlx::query("SELECT name FROM pragma_table_info('chores')")
+            .fetch_all(&self.pool)
+            .await?;
+        let existing: Vec<String> = rows
+            .iter()
+            .filter_map(|r| r.try_get::<String, _>(0).ok())
+            .collect();
+        let has = |column: &str| existing.iter().any(|name| name == column);
+        if !has("due_at") {
+            sqlx::query("ALTER TABLE chores ADD COLUMN due_at INTEGER")
+                .execute(&self.pool)
+                .await?;
+        }
+        if !has("kind") {
+            sqlx::query("ALTER TABLE chores ADD COLUMN kind INTEGER NOT NULL DEFAULT 0")
+                .execute(&self.pool)
+                .await?;
+        }
+        Ok(())
+    }
+
     /// Execute a DDL statement against the store.
     async fn create_table(&self, sql: &'static str) -> Result<(), StoreError> {
         sqlx::query(sql).execute(&self.pool).await?;
@@ -140,15 +192,16 @@ impl Store {
             sqlx::query(
                 "INSERT INTO chores
                     (id, room_id, target, action, estimated_seconds, status,
-                     ymin, xmin, ymax, xmax, confidence, subtasks, updated_at, how_to)
-                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                     ymin, xmin, ymax, xmax, confidence, subtasks, updated_at, how_to,
+                     due_at, kind)
+                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                  ON CONFLICT(id) DO UPDATE SET
                     room_id=excluded.room_id, target=excluded.target,
                     action=excluded.action, estimated_seconds=excluded.estimated_seconds,
                     status=excluded.status, ymin=excluded.ymin, xmin=excluded.xmin,
                     ymax=excluded.ymax, xmax=excluded.xmax, confidence=excluded.confidence,
                     subtasks=excluded.subtasks, updated_at=excluded.updated_at,
-                    how_to=excluded.how_to",
+                    how_to=excluded.how_to, due_at=excluded.due_at, kind=excluded.kind",
             )
             .bind(&chore.id)
             .bind(&chore.room_id)
@@ -164,6 +217,8 @@ impl Store {
             .bind(serde_json::to_string(&chore.subtasks).unwrap_or_default())
             .bind(now_unix())
             .bind(serde_json::to_string(&chore.how_to).unwrap_or_default())
+            .bind(chore.due_at_unix)
+            .bind(chore.kind as i64)
             .execute(&mut *tx)
             .await?;
         }
@@ -386,16 +441,123 @@ impl Store {
             .collect::<Result<Vec<_>, _>>()
             .map_err(StoreError::Database)
     }
+
+    /// Insert or replace a person; returns the stored row.
+    pub async fn upsert_person(&self, person: &Person) -> Result<Person, StoreError> {
+        sqlx::query(
+            "INSERT INTO people (id, name, notes) VALUES (?, ?, ?)
+             ON CONFLICT(id) DO UPDATE SET name=excluded.name, notes=excluded.notes",
+        )
+        .bind(&person.id)
+        .bind(&person.name)
+        .bind(&person.notes)
+        .execute(&self.pool)
+        .await?;
+        Ok(person.clone())
+    }
+
+    /// List all people, ordered by name.
+    pub async fn list_people(&self) -> Result<Vec<Person>, StoreError> {
+        let rows = sqlx::query("SELECT id, name, notes FROM people ORDER BY name")
+            .fetch_all(&self.pool)
+            .await?;
+        rows.iter()
+            .map(|r| {
+                Ok(Person {
+                    id: r.try_get("id")?,
+                    name: r.try_get("name")?,
+                    notes: r.try_get("notes")?,
+                })
+            })
+            .collect()
+    }
+
+    /// Delete a person; returns whether a row was removed.
+    pub async fn delete_person(&self, id: &str) -> Result<bool, StoreError> {
+        let result = sqlx::query("DELETE FROM people WHERE id = ?")
+            .bind(id)
+            .execute(&self.pool)
+            .await?;
+        Ok(result.rows_affected() > 0)
+    }
+
+    /// Insert or replace an occasion; returns the stored row.
+    pub async fn upsert_occasion(&self, occasion: &Occasion) -> Result<Occasion, StoreError> {
+        sqlx::query(
+            "INSERT INTO occasions (id, person_id, title, date, kind, notes)
+             VALUES (?, ?, ?, ?, ?, ?)
+             ON CONFLICT(id) DO UPDATE SET person_id=excluded.person_id,
+                title=excluded.title, date=excluded.date, kind=excluded.kind,
+                notes=excluded.notes",
+        )
+        .bind(&occasion.id)
+        .bind(&occasion.person_id)
+        .bind(&occasion.title)
+        .bind(&occasion.date)
+        .bind(occasion.kind as i64)
+        .bind(&occasion.notes)
+        .execute(&self.pool)
+        .await?;
+        Ok(occasion.clone())
+    }
+
+    /// List all occasions ordered by date.
+    pub async fn list_occasions(&self) -> Result<Vec<Occasion>, StoreError> {
+        let rows =
+            sqlx::query("SELECT id, person_id, title, date, kind, notes FROM occasions ORDER BY date")
+                .fetch_all(&self.pool)
+                .await?;
+        rows.iter()
+            .map(|r| {
+                Ok(Occasion {
+                    id: r.try_get("id")?,
+                    person_id: r.try_get("person_id")?,
+                    title: r.try_get("title")?,
+                    date: r.try_get("date")?,
+                    kind: r.try_get::<i64, _>("kind").unwrap_or(0) as i32,
+                    notes: r.try_get("notes")?,
+                })
+            })
+            .collect()
+    }
+
+    /// Delete an occasion; returns whether a row was removed.
+    pub async fn delete_occasion(&self, id: &str) -> Result<bool, StoreError> {
+        let result = sqlx::query("DELETE FROM occasions WHERE id = ?")
+            .bind(id)
+            .execute(&self.pool)
+            .await?;
+        Ok(result.rows_affected() > 0)
+    }
+
+    /// Record that a calendar source was just synced.
+    pub async fn record_calendar_sync(&self, url: &str) -> Result<(), StoreError> {
+        sqlx::query(
+            "INSERT INTO calendar_sources (url, last_synced_unix) VALUES (?, ?)
+             ON CONFLICT(url) DO UPDATE SET last_synced_unix=excluded.last_synced_unix",
+        )
+        .bind(url)
+        .bind(now_unix())
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+}
+
+/// Decode a JSON string list column, tolerating legacy empty values.
+fn decode_json_list(raw: &str, field: &'static str) -> Result<Vec<String>, StoreError> {
+    if raw.trim().is_empty() {
+        return Ok(Vec::new());
+    }
+    serde_json::from_str(raw).map_err(|e| StoreError::Decode(format!("{field}: {e}")))
 }
 
 /// Convert a chores table row into a contract entity.
 fn row_to_chore(row: &sqlx::sqlite::SqliteRow) -> Result<ChoreEntity, StoreError> {
     let subtasks_raw: String = row.try_get("subtasks")?;
-    let subtasks: Vec<String> = serde_json::from_str(&subtasks_raw)
-        .map_err(|e| StoreError::Decode(format!("subtasks: {e}")))?;
+    let subtasks: Vec<String> = decode_json_list(&subtasks_raw, "subtasks")?;
     let how_to_raw: String = row.try_get("how_to").unwrap_or_default();
-    let how_to: Vec<String> = serde_json::from_str(&how_to_raw)
-        .map_err(|e| StoreError::Decode(format!("how_to: {e}")))?;
+    let how_to: Vec<String> = decode_json_list(&how_to_raw, "how_to")?;
     let ymin = row.try_get::<Option<i64>, _>("ymin")?;
     let xmin = row.try_get::<Option<i64>, _>("xmin")?;
     let ymax = row.try_get::<Option<i64>, _>("ymax")?;
@@ -421,6 +583,12 @@ fn row_to_chore(row: &sqlx::sqlite::SqliteRow) -> Result<ChoreEntity, StoreError
         subtasks,
         how_to,
         last_seen_unix: Some(row.try_get::<i64, _>("updated_at")?),
+        due_at_unix: row.try_get::<Option<i64>, _>("due_at").unwrap_or(None),
+        kind: row
+            .try_get::<Option<i64>, _>("kind")
+            .ok()
+            .flatten()
+            .unwrap_or(0) as i32,
         ..Default::default()
     })
 }

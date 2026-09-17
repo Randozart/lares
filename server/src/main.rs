@@ -1,5 +1,6 @@
 //! Lares server entry point.
 
+mod people;
 mod routes;
 mod state;
 

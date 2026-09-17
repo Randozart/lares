@@ -9,6 +9,7 @@ import androidx.activity.compose.setContent
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -17,6 +18,7 @@ import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
@@ -27,11 +29,13 @@ import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.Card
+import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.FilterChip
+import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
@@ -61,13 +65,25 @@ import androidx.core.content.ContextCompat
 import androidx.lifecycle.viewmodel.compose.viewModel
 import dev.randozart.lares.capture.CameraController
 import dev.randozart.lares.proto.AnalyzeMode
+import dev.randozart.lares.proto.BriefingItem
 import dev.randozart.lares.proto.ChoreEntity
 import dev.randozart.lares.proto.ChoreStatus
+import dev.randozart.lares.proto.Occasion
+import dev.randozart.lares.proto.Person
 import dev.randozart.lares.proto.RoomArea
+import dev.randozart.lares.notify.BriefingFormat
+import dev.randozart.lares.notify.BriefingWorker
 import dev.randozart.lares.sensing.SettleDetector
 import dev.randozart.lares.ui.CameraPreview
 import dev.randozart.lares.ui.LiveOverlay
+import androidx.work.ExistingPeriodicWorkPolicy
+import androidx.work.PeriodicWorkRequestBuilder
+import androidx.work.WorkManager
 import kotlinx.coroutines.delay
+import java.time.Duration
+import java.time.LocalDateTime
+import java.time.LocalTime
+import java.util.concurrent.TimeUnit
 
 /** Entry point: owns the camera controller and hosts the Compose UI. */
 class MainActivity : ComponentActivity() {
@@ -76,9 +92,28 @@ class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         cameraController = CameraController(this)
+        scheduleBriefingWork()
         setContent {
             LaresApp(cameraController)
         }
+    }
+
+    /** Schedule the daily 08:00 briefing notification. */
+    private fun scheduleBriefingWork() {
+        val now = LocalDateTime.now()
+        var next = now.toLocalDate().atTime(LocalTime.of(8, 0))
+        if (!next.isAfter(now)) {
+            next = next.plusDays(1)
+        }
+        val delayMinutes = Duration.between(now, next).toMinutes()
+        val request = PeriodicWorkRequestBuilder<BriefingWorker>(24, TimeUnit.HOURS)
+            .setInitialDelay(delayMinutes, TimeUnit.MINUTES)
+            .build()
+        WorkManager.getInstance(this).enqueueUniquePeriodicWork(
+            "lares-briefing",
+            ExistingPeriodicWorkPolicy.KEEP,
+            request,
+        )
     }
 
     override fun onDestroy() {
@@ -96,6 +131,8 @@ fun LaresApp(controller: CameraController) {
     var howChore by remember { mutableStateOf<ChoreEntity?>(null) }
     var showSettings by remember { mutableStateOf(false) }
     var showChores by remember { mutableStateOf(false) }
+    var showPeople by remember { mutableStateOf(false) }
+    var showBriefing by remember { mutableStateOf(false) }
     val sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
     var hasCamera by remember {
         mutableStateOf(
@@ -103,14 +140,28 @@ fun LaresApp(controller: CameraController) {
                 PackageManager.PERMISSION_GRANTED,
         )
     }
+    val neededPermissions = buildList {
+        add(Manifest.permission.CAMERA)
+        if (android.os.Build.VERSION.SDK_INT >= 33) {
+            add(Manifest.permission.POST_NOTIFICATIONS)
+        }
+    }
     val permissionLauncher = rememberLauncherForActivityResult(
-        ActivityResultContracts.RequestPermission(),
-    ) { granted -> hasCamera = granted }
+        ActivityResultContracts.RequestMultiplePermissions(),
+    ) { grants -> hasCamera = grants[Manifest.permission.CAMERA] == true }
 
     LaunchedEffect(Unit) {
-        if (!hasCamera) {
-            permissionLauncher.launch(Manifest.permission.CAMERA)
+        val missing = neededPermissions.filter {
+            ContextCompat.checkSelfPermission(context, it) != PackageManager.PERMISSION_GRANTED
         }
+        if (missing.isNotEmpty()) {
+            permissionLauncher.launch(missing.toTypedArray())
+        }
+    }
+
+    // Persist connection settings whenever they change (worker reads prefs).
+    LaunchedEffect(viewModel.serverUrl, viewModel.calendarUrl) {
+        viewModel.persistPrefs()
     }
 
     LaunchedEffect(controller) {
@@ -193,6 +244,10 @@ fun LaresApp(controller: CameraController) {
                     label = { Text("Auto") },
                 )
             }
+            BriefingCard(
+                items = viewModel.briefingItems,
+                onExpand = { showBriefing = true },
+            )
         }
 
         // Bottom overlay: sweep / scan / reference + chores sheet.
@@ -233,13 +288,24 @@ fun LaresApp(controller: CameraController) {
                     Text("Ref")
                 }
             }
-            OutlinedButton(
-                onClick = { showChores = true },
+            Row(
                 modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
             ) {
-                val count = viewModel.filteredChores.size
-                val total = viewModel.chores.size
-                Text(if (viewModel.showAllChores) "Chores ($total)" else "Chores ($count/$total)")
+                OutlinedButton(
+                    onClick = { showChores = true },
+                    modifier = Modifier.weight(1f),
+                ) {
+                    val count = viewModel.filteredChores.size
+                    val total = viewModel.chores.size
+                    Text(if (viewModel.showAllChores) "Chores ($total)" else "Chores ($count/$total)")
+                }
+                OutlinedButton(
+                    onClick = { showPeople = true },
+                    modifier = Modifier.weight(1f),
+                ) {
+                    Text("People (${viewModel.people.size})")
+                }
             }
         }
     }
@@ -283,6 +349,28 @@ fun LaresApp(controller: CameraController) {
                     }
                 }
                 val display = viewModel.filteredChores
+                Text("Tasks", style = MaterialTheme.typography.titleSmall)
+                TaskQuickAdd(viewModel)
+                viewModel.tasks.forEach { task ->
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
+                        val due = task.dueAtUnix?.let { epoch ->
+                            java.time.Instant.ofEpochSecond(epoch).toString().take(10)
+                        } ?: "no date"
+                        Text(
+                            "$due — ${task.action}",
+                            style = MaterialTheme.typography.bodyMedium,
+                            modifier = Modifier.weight(1f),
+                        )
+                        TextButton(onClick = { viewModel.completeTask(task) }) {
+                            Text("Done")
+                        }
+                    }
+                }
+                HorizontalDivider()
+                Text("Vision chores", style = MaterialTheme.typography.titleSmall)
                 if (display.isEmpty()) {
                     Text(
                         if (viewModel.chores.isEmpty()) "No chores yet. Scan or sweep the room."
@@ -302,6 +390,32 @@ fun LaresApp(controller: CameraController) {
                 }
             }
         }
+    }
+
+    if (showPeople) {
+        ModalBottomSheet(onDismissRequest = { showPeople = false }, sheetState = sheetState) {
+            PeopleSheet(viewModel)
+        }
+    }
+
+    if (showBriefing) {
+        AlertDialog(
+            onDismissRequest = { showBriefing = false },
+            title = { Text("Coming up") },
+            text = {
+                Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                    if (viewModel.briefingItems.isEmpty()) {
+                        Text("Nothing on the horizon.", style = MaterialTheme.typography.bodySmall)
+                    }
+                    viewModel.briefingItems.forEach { item ->
+                        Text(BriefingFormat.format(item), style = MaterialTheme.typography.bodyMedium)
+                    }
+                }
+            },
+            confirmButton = {
+                TextButton(onClick = { showBriefing = false }) { Text("Done") }
+            },
+        )
     }
 }
 
@@ -460,5 +574,227 @@ private fun ChoreCard(
                 )
             }
         }
+    }
+}
+
+/** Compact overlay card summarizing the next briefing items. */
+@Composable
+private fun BriefingCard(items: List<BriefingItem>, onExpand: () -> Unit) {
+    if (items.isEmpty()) return
+    Card(
+        modifier = Modifier
+            .fillMaxWidth()
+            .clickable { onExpand() },
+        colors = CardDefaults.cardColors(
+            containerColor = Color.Black.copy(alpha = 0.55f),
+        ),
+    ) {
+        Column(
+            modifier = Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 8.dp),
+            verticalArrangement = Arrangement.spacedBy(2.dp),
+        ) {
+            items.take(3).forEach { item ->
+                Text(
+                    BriefingFormat.format(item),
+                    style = MaterialTheme.typography.bodySmall,
+                    color = Color.White,
+                )
+            }
+            if (items.size > 3) {
+                Text(
+                    "+${items.size - 3} more — tap to see all",
+                    style = MaterialTheme.typography.labelSmall,
+                    color = Color.White.copy(alpha = 0.7f),
+                )
+            }
+        }
+    }
+}
+
+/** Quick-add row for manual tasks inside the chores sheet. */
+@Composable
+private fun TaskQuickAdd(viewModel: MainViewModel) {
+    var title by remember { mutableStateOf("") }
+    var due by remember { mutableStateOf("") }
+    Row(
+        modifier = Modifier.fillMaxWidth(),
+        horizontalArrangement = Arrangement.spacedBy(8.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        OutlinedTextField(
+            value = title,
+            onValueChange = { title = it },
+            label = { Text("New task") },
+            singleLine = true,
+            modifier = Modifier.weight(1.4f),
+        )
+        OutlinedTextField(
+            value = due,
+            onValueChange = { due = it },
+            label = { Text("YYYY-MM-DD") },
+            singleLine = true,
+            modifier = Modifier.weight(1f),
+        )
+        Button(
+            onClick = {
+                viewModel.addTask(title, due)
+                title = ""
+                due = ""
+            },
+            enabled = title.isNotBlank(),
+        ) {
+            Text("Add")
+        }
+    }
+}
+
+/** People management sheet: registry, occasions, calendar sync. */
+@Composable
+private fun PeopleSheet(viewModel: MainViewModel) {
+    Column(
+        modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp).padding(bottom = 24.dp),
+        verticalArrangement = Arrangement.spacedBy(8.dp),
+    ) {
+        Text("People", style = MaterialTheme.typography.titleMedium)
+        PersonAddRow(viewModel)
+        HorizontalDivider()
+        LazyColumn(
+            modifier = Modifier.heightIn(max = 280.dp),
+            verticalArrangement = Arrangement.spacedBy(8.dp),
+        ) {
+            items(viewModel.people) { person ->
+                PersonCard(person, viewModel.occasions)
+            }
+        }
+        HorizontalDivider()
+        OccasionAddRow(viewModel)
+        HorizontalDivider()
+        CalendarSyncRow(viewModel)
+    }
+}
+
+/** Inline form to add a person. */
+@Composable
+private fun PersonAddRow(viewModel: MainViewModel) {
+    var name by remember { mutableStateOf("") }
+    var notes by remember { mutableStateOf("") }
+    Row(
+        modifier = Modifier.fillMaxWidth(),
+        horizontalArrangement = Arrangement.spacedBy(8.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        OutlinedTextField(
+            value = name,
+            onValueChange = { name = it },
+            label = { Text("Name") },
+            singleLine = true,
+            modifier = Modifier.weight(1f),
+        )
+        OutlinedTextField(
+            value = notes,
+            onValueChange = { notes = it },
+            label = { Text("Notes") },
+            singleLine = true,
+            modifier = Modifier.weight(1f),
+        )
+        Button(
+            onClick = {
+                viewModel.addPerson(name, notes)
+                name = ""
+                notes = ""
+            },
+            enabled = name.isNotBlank(),
+        ) {
+            Text("Add")
+        }
+    }
+}
+
+/** One person with their occasions listed beneath. */
+@Composable
+private fun PersonCard(person: Person, occasions: List<Occasion>) {
+    Card(modifier = Modifier.fillMaxWidth()) {
+        Column(
+            modifier = Modifier.fillMaxWidth().padding(12.dp),
+            verticalArrangement = Arrangement.spacedBy(4.dp),
+        ) {
+            Text(person.name, style = MaterialTheme.typography.bodyLarge)
+            if (person.notes.isNotEmpty()) {
+                Text(person.notes, style = MaterialTheme.typography.bodySmall)
+            }
+            occasions.filter { it.personId == person.id }.forEach { occasion ->
+                Text(
+                    "• ${occasion.title} — ${occasion.date}",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = Color.Gray,
+                )
+            }
+        }
+    }
+}
+
+/** Inline form to add a dated occasion. */
+@Composable
+private fun OccasionAddRow(viewModel: MainViewModel) {
+    var person by remember { mutableStateOf("") }
+    var title by remember { mutableStateOf("") }
+    var date by remember { mutableStateOf("") }
+    Text("Add occasion", style = MaterialTheme.typography.titleSmall)
+    OutlinedTextField(
+        value = person,
+        onValueChange = { person = it },
+        label = { Text("Person (optional)") },
+        singleLine = true,
+        modifier = Modifier.fillMaxWidth(),
+    )
+    Row(
+        modifier = Modifier.fillMaxWidth(),
+        horizontalArrangement = Arrangement.spacedBy(8.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        OutlinedTextField(
+            value = title,
+            onValueChange = { title = it },
+            label = { Text("Title") },
+            singleLine = true,
+            modifier = Modifier.weight(1.4f),
+        )
+        OutlinedTextField(
+            value = date,
+            onValueChange = { date = it },
+            label = { Text("MM-DD") },
+            singleLine = true,
+            modifier = Modifier.weight(1f),
+        )
+        Button(
+            onClick = {
+                viewModel.addOccasion(person, title, date)
+                title = ""
+                date = ""
+            },
+            enabled = title.isNotBlank() && date.isNotBlank(),
+        ) {
+            Text("Add")
+        }
+    }
+}
+
+/** ICS calendar URL field with a manual sync button. */
+@Composable
+private fun CalendarSyncRow(viewModel: MainViewModel) {
+    Text("Calendar sync", style = MaterialTheme.typography.titleSmall)
+    OutlinedTextField(
+        value = viewModel.calendarUrl,
+        onValueChange = { viewModel.calendarUrl = it },
+        label = { Text("Google Calendar iCal URL") },
+        singleLine = true,
+        modifier = Modifier.fillMaxWidth(),
+    )
+    Button(
+        onClick = { viewModel.syncCalendar() },
+        enabled = viewModel.calendarUrl.isNotBlank() && !viewModel.busy,
+        modifier = Modifier.fillMaxWidth(),
+    ) {
+        Text("Sync now")
     }
 }

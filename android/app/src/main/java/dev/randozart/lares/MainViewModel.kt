@@ -1,5 +1,6 @@
 package dev.randozart.lares
 
+import android.app.Application
 import android.content.ContentValues
 import android.content.Context
 import android.graphics.Bitmap
@@ -14,16 +15,20 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateMapOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
-import androidx.lifecycle.ViewModel
+import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import dev.randozart.lares.annotate.annotateSnapshot
 import dev.randozart.lares.capture.CameraController
 import dev.randozart.lares.net.LaresClient
 import dev.randozart.lares.proto.AnalyzeMode
+import dev.randozart.lares.proto.BriefingItem
 import dev.randozart.lares.proto.ChoreEntity
+import dev.randozart.lares.proto.ChoreKind
 import dev.randozart.lares.proto.ChoreStatus
 import dev.randozart.lares.proto.FingerprintKind
 import dev.randozart.lares.proto.Landmark
+import dev.randozart.lares.proto.Occasion
+import dev.randozart.lares.proto.Person
 import dev.randozart.lares.proto.RoomArea
 import dev.randozart.lares.tracking.TrackingEngine
 import kotlinx.coroutines.Dispatchers
@@ -32,6 +37,8 @@ import kotlinx.coroutines.withContext
 import uniffi.lares_tracking.GrayFrame
 import uniffi.lares_tracking.TrackedBox
 import java.io.ByteArrayOutputStream
+import java.time.LocalDate
+import java.time.ZoneOffset
 
 /** Maximum fingerprint distance (of 64 bits) that still counts as "unchanged". */
 private const val SCENE_CHANGE_BITS = 6u
@@ -46,16 +53,45 @@ private const val TAG = "LaresVM"
 /**
  * UI state for the fast loop: live tracked boxes, the cost-guard auto-scan
  * state machine, and the chore/landmark overlay derived from the slow loop.
+ * Also holds the proactive layer: briefing, people, occasions, manual tasks.
  */
-class MainViewModel : ViewModel() {
+class MainViewModel(app: Application) : AndroidViewModel(app) {
     private val client = LaresClient()
     private val engine = TrackingEngine(2u)
+    private val prefs = app.getSharedPreferences("lares", Context.MODE_PRIVATE)
 
-    var serverUrl by mutableStateOf("http://100.111.244.0:8787")
+    var serverUrl by mutableStateOf(prefs.getString("serverUrl", null) ?: "http://100.111.244.0:8787")
+    var calendarUrl by mutableStateOf(prefs.getString("calendarUrl", "") ?: "")
     var roomId by mutableStateOf("kitchen")
     var roomArea by mutableStateOf(RoomArea.ROOM_AREA_KITCHEN)
     var description by mutableStateOf("counters clear, room tidy")
     var mode by mutableStateOf(AnalyzeMode.ANALYZE_MODE_DISCOVER)
+
+    /** Persist connection settings so the background worker can reach the server. */
+    fun persistPrefs() {
+        prefs.edit()
+            .putString("serverUrl", serverUrl)
+            .putString("calendarUrl", calendarUrl)
+            .apply()
+    }
+
+    /** Active briefing items within the default horizon. */
+    var briefingItems by mutableStateOf<List<BriefingItem>>(emptyList())
+        private set
+
+    /** Known people and their occasions. */
+    var people by mutableStateOf<List<Person>>(emptyList())
+        private set
+    var occasions by mutableStateOf<List<Occasion>>(emptyList())
+        private set
+
+    /** Active manual tasks (not done/dismissed). */
+    val tasks: List<ChoreEntity>
+        get() = chores.filter {
+            it.kind == ChoreKind.CHORE_KIND_TASK &&
+                it.status != ChoreStatus.CHORE_STATUS_DONE &&
+                it.status != ChoreStatus.CHORE_STATUS_DISMISSED
+        }
 
     var chores by mutableStateOf<List<ChoreEntity>>(emptyList())
     var trackedBoxes by mutableStateOf<List<TrackedBox>>(emptyList())
@@ -245,6 +281,141 @@ class MainViewModel : ViewModel() {
         }
     }
 
+    init {
+        refreshChores()
+        loadBriefing()
+        refreshPeople()
+        refreshOccasions()
+    }
+
+    /** Fetch the proactive briefing digest. */
+    fun loadBriefing() {
+        viewModelScope.launch {
+            withContext(Dispatchers.IO) {
+                runCatching { client.getBriefing(serverUrl) }
+                    .onSuccess { briefingItems = it.itemsList }
+                    .onFailure { }
+            }
+        }
+    }
+
+    /** Reload the people list. */
+    fun refreshPeople() {
+        viewModelScope.launch {
+            withContext(Dispatchers.IO) {
+                runCatching { client.listPeople(serverUrl) }
+                    .onSuccess { people = it }
+                    .onFailure { }
+            }
+        }
+    }
+
+    /** Reload the occasions list. */
+    fun refreshOccasions() {
+        viewModelScope.launch {
+            withContext(Dispatchers.IO) {
+                runCatching { client.listOccasions(serverUrl) }
+                    .onSuccess { occasions = it }
+                    .onFailure { }
+            }
+        }
+    }
+
+    /** Create a manual task; due date is "YYYY-MM-DD" or empty. */
+    fun addTask(title: String, dueDate: String) {
+        if (title.trim().isEmpty()) return
+        viewModelScope.launch {
+            withContext(Dispatchers.IO) {
+                runCatching {
+                    client.createTask(serverUrl, roomId, title.trim(), parseDueDate(dueDate))
+                }
+                    .onSuccess {
+                        statusLine = "task added"
+                        refreshChores()
+                        loadBriefing()
+                    }
+                    .onFailure { statusLine = "error: ${it.message}" }
+            }
+        }
+    }
+
+    /** Mark a task chore done. */
+    fun completeTask(task: ChoreEntity) {
+        viewModelScope.launch {
+            withContext(Dispatchers.IO) {
+                runCatching { client.setStatus(serverUrl, task.id, ChoreStatus.CHORE_STATUS_DONE) }
+                    .onSuccess {
+                        refreshChores()
+                        loadBriefing()
+                    }
+                    .onFailure { statusLine = "error: ${it.message}" }
+            }
+        }
+    }
+
+    /** Add a person to the household registry. */
+    fun addPerson(name: String, notes: String) {
+        if (name.trim().isEmpty()) return
+        viewModelScope.launch {
+            withContext(Dispatchers.IO) {
+                runCatching { client.addPerson(serverUrl, name.trim(), notes.trim()) }
+                    .onSuccess {
+                        statusLine = "${it.name} added"
+                        refreshPeople()
+                    }
+                    .onFailure { statusLine = "error: ${it.message}" }
+            }
+        }
+    }
+
+    /** Add a dated occasion; date is "MM-DD" (yearly) or "YYYY-MM-DD" (once). */
+    fun addOccasion(personName: String, title: String, date: String) {
+        if (title.trim().isEmpty() || date.trim().isEmpty()) return
+        viewModelScope.launch {
+            withContext(Dispatchers.IO) {
+                runCatching {
+                    val personId = people.firstOrNull {
+                        it.name.equals(personName.trim(), ignoreCase = true)
+                    }?.id ?: ""
+                    client.addOccasion(serverUrl, personId, title.trim(), date.trim())
+                }
+                    .onSuccess {
+                        statusLine = "occasion added"
+                        refreshOccasions()
+                        loadBriefing()
+                    }
+                    .onFailure { statusLine = "error: ${it.message}" }
+            }
+        }
+    }
+
+    /** Import occasions from the configured ICS calendar URL. */
+    fun syncCalendar() {
+        if (calendarUrl.trim().isEmpty()) {
+            statusLine = "set a calendar URL first"
+            return
+        }
+        persistPrefs()
+        viewModelScope.launch {
+            statusLine = "syncing calendar..."
+            withContext(Dispatchers.IO) {
+                runCatching { client.importCalendar(serverUrl, calendarUrl.trim()) }
+                    .onSuccess {
+                        statusLine = "calendar: ${it.imported} occasions, ${it.people} people"
+                        refreshPeople()
+                        refreshOccasions()
+                        loadBriefing()
+                    }
+                    .onFailure { statusLine = "error: ${it.message}" }
+            }
+        }
+    }
+
+    /** Parse "YYYY-MM-DD" to epoch seconds at UTC midnight, or null. */
+    private fun parseDueDate(text: String): Long? = runCatching {
+        LocalDate.parse(text.trim()).atStartOfDay(ZoneOffset.UTC).toEpochSecond()
+    }.getOrNull()
+
     /** Send the captured frame to the slow loop and store the response. */
     private fun analyze(jpeg: ByteArray, anchor: GrayFrame?) {
         viewModelScope.launch {
@@ -276,6 +447,8 @@ class MainViewModel : ViewModel() {
             scanning = false
             lastScanAt = SystemClock.elapsedRealtime()
             postFingerprint()
+            refreshChores()
+            loadBriefing()
         }
     }
 
@@ -402,6 +575,8 @@ class MainViewModel : ViewModel() {
             scanning = false
             lastScanAt = SystemClock.elapsedRealtime()
             postFingerprint()
+            refreshChores()
+            loadBriefing()
         }
     }
 

@@ -255,7 +255,7 @@ fn parse_response(body: Value) -> Result<ParsedScene, InferenceError> {
         })?;
     let text = parts
         .iter()
-        .filter(|p| p.get("thought").and_then(|v| v.as_bool()).unwrap_or(false) != true)
+        .filter(|p| !p.get("thought").and_then(|v| v.as_bool()).unwrap_or(false))
         .find_map(|p| p["text"].as_str())
         .ok_or_else(|| {
             InferenceError::InvalidResponse(

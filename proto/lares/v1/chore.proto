@@ -29,6 +29,16 @@ enum ChoreStatus {
   CHORE_STATUS_DISMISSED = 4;
 }
 
+// Where a chore came from and how it is handled. VISION chores carry boxes
+// and are tracked on the overlay; TASK/REMINDER chores are manual entries
+// with due dates.
+enum ChoreKind {
+  CHORE_KIND_UNSPECIFIED = 0;
+  CHORE_KIND_VISION = 1;
+  CHORE_KIND_TASK = 2;
+  CHORE_KIND_REMINDER = 3;
+}
+
 // Typed room area so the model can reason about whether objects are expected.
 enum RoomArea {
   ROOM_AREA_UNSPECIFIED = 0;
@@ -92,6 +102,8 @@ message ChoreEntity {
   // 1-based index identifying this specific physical object in the scene.
   // Stable across the scene — same object always gets the same number.
   int32 object_index = 19;
+  // Origin of the chore: vision-detected or manually added.
+  ChoreKind kind = 20;
 }
 
 // A persistent, named spatial anchor in a room (e.g. sink basin, hamper).

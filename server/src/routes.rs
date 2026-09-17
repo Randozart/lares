@@ -22,7 +22,7 @@ use crate::state::AppState;
 
 /// Build the application router with the given shared state.
 pub fn router(state: AppState) -> Router {
-    Router::new()
+    let core = Router::new()
         .route("/v1/health", get(health))
         .route("/v1/analyze", post(analyze))
         .route(
@@ -48,10 +48,12 @@ pub fn router(state: AppState) -> Router {
             "/v1/rooms/{room_id}/expected/{label}",
             delete(remove_expected),
         )
+        .with_state(state.clone());
+    let proactive = crate::people::router(state);
+    core.merge(proactive)
         // Phone captures are multi-megabyte JPEGs; the default 2MB body limit
         // rejects them. 32MB headroom covers even large reference frames.
         .layer(DefaultBodyLimit::max(32 * 1024 * 1024))
-        .with_state(state)
 }
 
 /// Query parameters for listing chores.
@@ -275,17 +277,17 @@ pub struct ApiError {
 
 impl ApiError {
     /// Build a 400 error.
-    fn bad_request(message: impl Into<String>) -> Self {
+    pub(crate) fn bad_request(message: impl Into<String>) -> Self {
         Self { status: StatusCode::BAD_REQUEST, message: message.into() }
     }
 
     /// Build a 404 error.
-    fn not_found(message: impl Into<String>) -> Self {
+    pub(crate) fn not_found(message: impl Into<String>) -> Self {
         Self { status: StatusCode::NOT_FOUND, message: message.into() }
     }
 
     /// Build a 500 error.
-    fn internal(message: impl Into<String>) -> Self {
+    pub(crate) fn internal(message: impl Into<String>) -> Self {
         Self { status: StatusCode::INTERNAL_SERVER_ERROR, message: message.into() }
     }
 }
