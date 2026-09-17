@@ -94,6 +94,7 @@ impl LocalEngine {
         &self,
         req: AnalyzeSceneRequest,
     ) -> Result<AnalyzeSceneResponse, InferenceError> {
+        let start = std::time::Instant::now();
         let body = self.build_body(&req);
         let url = format!("{}/v1/chat/completions", self.endpoint.trim_end_matches('/'));
         let response = self
@@ -123,6 +124,7 @@ impl LocalEngine {
             chores: scene.chores,
             landmarks: scene.landmarks,
             model: self.model.clone(),
+            latency_ms: start.elapsed().as_millis() as u32,
             ..Default::default()
         })
     }
