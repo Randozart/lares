@@ -94,14 +94,6 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
     var engagedId by mutableStateOf<String?>(null)
         private set
 
-    /** Clutter index: honest gamified scale of active vision chores. */
-    val clutterIndex: Int
-        get() = chores.count {
-            it.kind == ChoreKind.CHORE_KIND_VISION &&
-                it.status != ChoreStatus.CHORE_STATUS_DONE &&
-                it.status != ChoreStatus.CHORE_STATUS_DISMISSED
-        }.let { count -> (count * 7).coerceAtMost(100) }
-
     /** Persist connection and HUD settings for the background worker. */
     fun persistPrefs() {
         prefs.edit()

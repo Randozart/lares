@@ -120,19 +120,6 @@ private fun DrawScope.drawDesignator(rect: androidx.compose.ui.geometry.Rect, co
     drawLine(color, Offset(l, b), Offset(l, b - arm), strokeWidth = stroke)
     drawLine(color, Offset(r, b), Offset(r - arm, b), strokeWidth = stroke)
     drawLine(color, Offset(r, b), Offset(r, b - arm), strokeWidth = stroke)
-    drawDiamond(rect.center, arm * 0.28f, color)
-}
-
-/** Draw the centroid diamond marker. */
-private fun DrawScope.drawDiamond(center: Offset, radius: Float, color: Color) {
-    val path = Path().apply {
-        moveTo(center.x, center.y - radius)
-        lineTo(center.x + radius, center.y)
-        lineTo(center.x, center.y + radius)
-        lineTo(center.x - radius, center.y)
-        close()
-    }
-    drawPath(path, color, style = Stroke(width = HudStroke.toPx() * 0.75f))
 }
 
 /** Draw the leader line and telegraphic target data block. */

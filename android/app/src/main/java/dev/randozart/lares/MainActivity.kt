@@ -2,10 +2,7 @@ package dev.randozart.lares
 
 import android.Manifest
 import android.content.Context
-import android.content.Intent
-import android.content.IntentFilter
 import android.content.pm.PackageManager
-import android.os.BatteryManager
 import android.os.Bundle
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.rememberLauncherForActivityResult
@@ -371,15 +368,6 @@ fun dualPulseHaptic(context: Context) {
     )
 }
 
-/** Current battery percentage from the sticky battery intent. */
-fun batteryPercent(context: Context): Int {
-    val intent = context.registerReceiver(null, IntentFilter(Intent.ACTION_BATTERY_CHANGED))
-    val level = intent?.getIntExtra(BatteryManager.EXTRA_LEVEL, -1) ?: -1
-    val scale = intent?.getIntExtra(BatteryManager.EXTRA_SCALE, 100) ?: 100
-    if (level < 0) return 0
-    return level * 100 / scale
-}
-
 /** Chip colors tuned for the HUD: amber labels, amber fill when selected. */
 @Composable
 private fun hudChipColors(palette: HudPalette) = FilterChipDefaults.filterChipColors(
@@ -405,7 +393,6 @@ private fun HudChrome(
     onHow: (ChoreEntity) -> Unit,
 ) {
     val context = LocalContext.current
-    val battery = remember { batteryPercent(context) }
     val processing = viewModel.busy || viewModel.scanning || viewModel.sweeping
     Box(Modifier.fillMaxSize()) {
         // Readability scrims: dark gradients behind top and bottom chrome.
@@ -441,8 +428,7 @@ private fun HudChrome(
         ) {
             Row(modifier = Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
                 Text(
-                    "SYS: NOMINAL // TGT: ${viewModel.clutterIndex / 7}" +
-                        " // RADS: ${viewModel.clutterIndex}% // BAT: $battery%",
+                    hud(viewModel.statusLine),
                     fontFamily = HudFont,
                     fontSize = 10.sp,
                     letterSpacing = 0.1.sp,
@@ -460,14 +446,6 @@ private fun HudChrome(
                     )
                 }
             }
-            Text(
-                hud(viewModel.statusLine),
-                fontFamily = HudFont,
-                fontSize = 9.sp,
-                letterSpacing = 0.1.sp,
-                color = palette.dim,
-                modifier = Modifier.fillMaxWidth(),
-            )
             Row(horizontalArrangement = Arrangement.spacedBy(5.dp)) {
                 AreaDropdown(viewModel, palette)
                 HudToggle("A/G", viewModel.mode == AnalyzeMode.ANALYZE_MODE_DISCOVER, palette) {
