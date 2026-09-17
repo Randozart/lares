@@ -194,7 +194,7 @@ impl GeminiEngine {
         }
         let (system, user) = match req.mode == AnalyzeMode::Diff as i32 {
             true => (diff_system_prompt(), diff_user_prompt(area_name)),
-            false => (discover_system_prompt(), discover_user_prompt(area_name)),
+            false => (discover_system_prompt(area_name), discover_user_prompt(area_name)),
         };
         let frame = downscale_jpeg(&req.frame_jpeg, MAX_INPUT_DIM);
         if req.mode == AnalyzeMode::Diff as i32 {

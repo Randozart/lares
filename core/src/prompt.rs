@@ -7,22 +7,26 @@
 use serde_json::{json, Value};
 
 /// System instruction for discovering actionable chores in a frame.
-pub fn discover_system_prompt() -> String {
-    concat!(
-        "You are an assistive vision system that turns messy rooms into clear, actionable tasks. ",
-        "Analyze the room image and identify actionable physical chores. ",
-        "Be conservative: only report items you can see clearly. ",
-        "If you are not sure of the specific type of an object, use a generic label ",
-        "(e.g. \"drink container\") rather than guessing a specific one. ",
-        "Ignore items that are properly stored, and omit anything you are not sure ",
-        "needs attention. ",
-        "Prefer atomic, single-step actions over broad tasks. ",
-        "For every chore provide 2-4 concrete physical steps in `how_to` ",
-        "that a person can follow without needing judgment: name the specific ",
-        "object, where it goes, and what to do with it. ",
-        "Return ONLY JSON matching the provided schema."
+pub fn discover_system_prompt(room_area: &str) -> String {
+    format!(
+        "You are an assistive vision system that turns messy rooms into clear, actionable tasks. \
+         Analyze the room image and identify actionable physical chores. \
+         Be conservative: only report items you can see clearly. \
+         If you are not sure of the specific type of an object, use a generic label \
+         (e.g. \"drink container\") rather than guessing a specific one. \
+         Ignore items that are properly stored, and omit anything you are not sure \
+         needs attention. \
+         Prefer atomic, single-step actions over broad tasks. \
+         Directives must restore items to sensible storage for a tidy {room_area}: \
+         remotes and controllers go to the TV stand or coffee table, dishes to the \
+         sink or dishwasher, clothes to the hamper or closet, toys to a shelf or \
+         box, trash to the bin. Never suggest the floor as a destination. \
+         Only report items that are genuinely out of place in a tidy {room_area}. \
+         For every chore provide 2-4 concrete physical steps in `how_to` \
+         that a person can follow without needing judgment: name the specific \
+         object, where it goes, and what to do with it. \
+         Return ONLY JSON matching the provided schema."
     )
-    .to_string()
 }
 
 /// System instruction for a multi-frame sweep of a single room.
@@ -151,9 +155,11 @@ mod tests {
 
     #[test]
     fn discover_prompt_mentions_actionable_and_atomic() {
-        let p = discover_system_prompt();
+        let p = discover_system_prompt("kitchen");
         assert!(p.contains("actionable"));
         assert!(p.contains("atomic"));
+        assert!(p.contains("kitchen"));
+        assert!(p.contains("Never suggest the floor"));
     }
 
     #[test]

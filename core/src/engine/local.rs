@@ -65,7 +65,7 @@ impl LocalEngine {
             }
             match req.mode == crate::domain::AnalyzeMode::Diff as i32 {
                 true => (diff_system_prompt(), diff_user_prompt(area)),
-                false => (discover_system_prompt(), discover_user_prompt(area)),
+                false => (discover_system_prompt(area), discover_user_prompt(area)),
             }
         };
         let mut content = vec![json!({ "type": "text", "text": user })];
