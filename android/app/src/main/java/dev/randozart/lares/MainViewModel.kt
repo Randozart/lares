@@ -35,6 +35,8 @@ import dev.randozart.lares.proto.PreparationState
 import dev.randozart.lares.proto.RecurrenceFreq
 import dev.randozart.lares.proto.RoomArea
 import dev.randozart.lares.tracking.TrackingEngine
+import dev.randozart.lares.ui.hud.hudTransform
+import dev.randozart.lares.ui.hud.pointInBox
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
@@ -71,14 +73,6 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
     var description by mutableStateOf("counters clear, room tidy")
     var mode by mutableStateOf(AnalyzeMode.ANALYZE_MODE_DISCOVER)
 
-    /** Persist connection settings so the background worker can reach the server. */
-    fun persistPrefs() {
-        prefs.edit()
-            .putString("serverUrl", serverUrl)
-            .putString("calendarUrl", calendarUrl)
-            .apply()
-    }
-
     /** Active briefing items within the default horizon. */
     var briefingItems by mutableStateOf<List<BriefingItem>>(emptyList())
         private set
@@ -92,6 +86,56 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
     /** Event preparations (gifts, cakes, cards, decor, cleaning). */
     var preparations by mutableStateOf<List<Preparation>>(emptyList())
         private set
+
+    /** HUD symbology color: "amber" or "green". */
+    var hudColor by mutableStateOf(prefs.getString("hudColor", null) ?: "amber")
+
+    /** Currently engaged (locked) target chore id, if any. */
+    var engagedId by mutableStateOf<String?>(null)
+        private set
+
+    /** Clutter index: honest gamified scale of active vision chores. */
+    val clutterIndex: Int
+        get() = chores.count {
+            it.kind == ChoreKind.CHORE_KIND_VISION &&
+                it.status != ChoreStatus.CHORE_STATUS_DONE &&
+                it.status != ChoreStatus.CHORE_STATUS_DISMISSED
+        }.let { count -> (count * 7).coerceAtMost(100) }
+
+    /** Persist connection and HUD settings for the background worker. */
+    fun persistPrefs() {
+        prefs.edit()
+            .putString("serverUrl", serverUrl)
+            .putString("calendarUrl", calendarUrl)
+            .putString("hudColor", hudColor)
+            .apply()
+    }
+
+    /**
+     * Handle a tap on the overlay: engage the hit target, neutralize the
+     * already-engaged one, or clear engagement on empty space.
+     *
+     * Returns the chore id to neutralize, if this tap is a kill.
+     */
+    fun handleTap(x: Float, y: Float, screenW: Float, screenH: Float): String? {
+        val transform = hudTransform(screenW, screenH, lastFrameWidth, lastFrameHeight)
+        val point = transform.toNorm(x, y, lastFrameWidth.toFloat(), lastFrameHeight.toFloat())
+        val hit = trackedBoxes.firstOrNull { box ->
+            box.confidence >= 0.15f && pointInBox(
+                point.x, point.y, box.xmin, box.ymin, box.xmax, box.ymax,
+            )
+        }
+        if (hit == null) {
+            engagedId = null
+            return null
+        }
+        if (hit.id == engagedId) {
+            engagedId = null
+            return hit.id
+        }
+        engagedId = hit.id
+        return null
+    }
 
     /** Active manual tasks (not done/dismissed). */
     val tasks: List<ChoreEntity>

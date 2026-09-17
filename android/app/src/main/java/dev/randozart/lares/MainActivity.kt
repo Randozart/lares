@@ -1,15 +1,22 @@
 package dev.randozart.lares
 
 import android.Manifest
+import android.content.Context
+import android.content.Intent
+import android.content.IntentFilter
 import android.content.pm.PackageManager
+import android.os.BatteryManager
 import android.os.Bundle
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.animation.core.Animatable
+import androidx.compose.animation.core.tween
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -53,11 +60,13 @@ import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.asImageBitmap
+import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
@@ -80,11 +89,20 @@ import dev.randozart.lares.notify.BriefingWorker
 import dev.randozart.lares.notify.ReminderWorker
 import dev.randozart.lares.sensing.SettleDetector
 import dev.randozart.lares.ui.CameraPreview
-import dev.randozart.lares.ui.LiveOverlay
+import dev.randozart.lares.ui.hud.HudBlack
+import dev.randozart.lares.ui.hud.HudFont
+import dev.randozart.lares.ui.hud.HudPalette
+import dev.randozart.lares.ui.hud.KillEffect
+import dev.randozart.lares.ui.hud.hud
+import dev.randozart.lares.ui.hud.hudColorScheme
+import dev.randozart.lares.ui.hud.hudPalette
+import dev.randozart.lares.ui.hud.HudOverlay
 import androidx.work.ExistingPeriodicWorkPolicy
 import androidx.work.PeriodicWorkRequestBuilder
 import androidx.work.WorkManager
+import androidx.compose.ui.unit.sp
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.launch
 import java.time.Duration
 import java.time.LocalDateTime
 import java.time.LocalTime
@@ -199,234 +217,348 @@ fun LaresApp(controller: CameraController) {
         }
     }
 
-    Box(Modifier.fillMaxSize().background(Color.Black)) {
-        CameraPreview(controller = controller, modifier = Modifier.matchParentSize())
-        LiveOverlay(
-            boxes = viewModel.trackedBoxes,
-            choresById = viewModel.choresById,
-            landmarks = viewModel.landmarks,
-            frameW = viewModel.lastFrameWidth,
-            frameH = viewModel.lastFrameHeight,
-            modifier = Modifier.matchParentSize(),
-        )
+    val palette = hudPalette(viewModel.hudColor)
+    val scope = rememberCoroutineScope()
+    var killEffect by remember { mutableStateOf<KillEffect?>(null) }
+    val killAnim = remember { Animatable(1f) }
 
-        // Top overlay: title + status + settings.
+    /**
+     * Neutralize a target: done-status on the server, dual-pulse haptic,
+     * and the 400ms bracket-collapse kill animation.
+     */
+    fun neutralize(choreId: String) {
+        val target = viewModel.choresById[choreId]?.target ?: "TARGET"
+        dualPulseHaptic(context)
+        viewModel.setStatus(choreId, ChoreStatus.CHORE_STATUS_DONE)
+        scope.launch {
+            killAnim.snapTo(0f)
+            killEffect = KillEffect(choreId, target, 0f)
+            killAnim.animateTo(1f, tween(durationMillis = 400))
+            killEffect = null
+        }
+    }
+
+    MaterialTheme(colorScheme = hudColorScheme(palette)) {
+        Box(Modifier.fillMaxSize().background(HudBlack)) {
+            CameraPreview(controller = controller, modifier = Modifier.matchParentSize())
+            HudOverlay(
+                boxes = viewModel.trackedBoxes,
+                choresById = viewModel.choresById,
+                landmarks = viewModel.landmarks,
+                frameW = viewModel.lastFrameWidth,
+                frameH = viewModel.lastFrameHeight,
+                palette = palette,
+                engagedId = viewModel.engagedId,
+                killEffect = killEffect,
+                modifier = Modifier
+                    .matchParentSize()
+                    .pointerInput(Unit) {
+                        detectTapGestures { offset ->
+                            val killed = viewModel.handleTap(
+                                offset.x, offset.y, size.width.toFloat(), size.height.toFloat(),
+                            )
+                            if (killed != null) {
+                                neutralize(killed)
+                            }
+                        }
+                    },
+            )
+            HudChrome(
+                viewModel = viewModel,
+                palette = palette,
+                onEngageSettings = { showSettings = true },
+                onShowBriefing = { showBriefing = true },
+                onShowChores = { showChores = true },
+                onShowPeople = { showPeople = true },
+                onSweep = {
+                    if (viewModel.sweeping) viewModel.endSweep()
+                    else viewModel.startSweep()
+                },
+                onScan = { viewModel.captureAndAnalyze(controller, bypassGates = true) },
+                onReference = { viewModel.captureReference(controller) },
+                hasCamera = hasCamera,
+                onHow = { howChore = it },
+            )
+        }
+
+        // Sheets + dialogs (inside the theme so they adopt black/amber).
+        if (showSettings) {
+            SettingsDialog(viewModel = viewModel, onDismiss = { showSettings = false })
+        }
+        howChore?.let { chore ->
+            HowDialog(
+                chore = chore,
+                onDismiss = { howChore = null },
+                onSave = {
+                    viewModel.saveSnapshot(context, chore)
+                    howChore = null
+                },
+            )
+        }
+        if (showChores) {
+            ModalBottomSheet(
+                onDismissRequest = { showChores = false },
+                sheetState = sheetState,
+                containerColor = palette.background,
+            ) {
+                ChoreSheetContent(
+                    viewModel = viewModel,
+                    onHow = { howChore = it },
+                )
+            }
+        }
+        if (showPeople) {
+            ModalBottomSheet(
+                onDismissRequest = { showPeople = false },
+                sheetState = sheetState,
+                containerColor = palette.background,
+            ) {
+                PeopleSheet(viewModel)
+            }
+        }
+        if (showBriefing) {
+            AlertDialog(
+                onDismissRequest = { showBriefing = false },
+                title = { Text(hud("Coming up"), fontFamily = HudFont) },
+                text = {
+                    Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                        if (viewModel.briefingItems.isEmpty()) {
+                            Text(
+                                hud("Nothing on the horizon."),
+                                style = MaterialTheme.typography.bodySmall,
+                            )
+                        }
+                        viewModel.briefingItems.forEach { item ->
+                            Text(
+                                BriefingFormat.format(item),
+                                style = MaterialTheme.typography.bodyMedium,
+                            )
+                        }
+                    }
+                },
+                confirmButton = {
+                    TextButton(onClick = { showBriefing = false }) { Text(hud("Done")) }
+                },
+            )
+        }
+    }
+}
+
+/** Fire the dual-pulse "target neutralized" haptic. */
+fun dualPulseHaptic(context: Context) {
+    val vibrator = if (android.os.Build.VERSION.SDK_INT >= 31) {
+        val manager = context.getSystemService(Context.VIBRATOR_MANAGER_SERVICE)
+            as? android.os.VibratorManager
+        manager?.defaultVibrator
+    } else {
+        @Suppress("DEPRECATION")
+        context.getSystemService(Context.VIBRATOR_SERVICE) as? android.os.Vibrator
+    } ?: return
+    if (!vibrator.hasVibrator()) return
+    vibrator.vibrate(
+        android.os.VibrationEffect.createWaveform(longArrayOf(0, 40, 60, 40), -1),
+    )
+}
+
+/** Current battery percentage from the sticky battery intent. */
+fun batteryPercent(context: Context): Int {
+    val intent = context.registerReceiver(null, IntentFilter(Intent.ACTION_BATTERY_CHANGED))
+    val level = intent?.getIntExtra(BatteryManager.EXTRA_LEVEL, -1) ?: -1
+    val scale = intent?.getIntExtra(BatteryManager.EXTRA_SCALE, 100) ?: 100
+    if (level < 0) return 0
+    return level * 100 / scale
+}
+
+/** All fixed HUD chrome: top telemetry, mission board, bottom controls. */
+@Composable
+private fun HudChrome(
+    viewModel: MainViewModel,
+    palette: HudPalette,
+    onEngageSettings: () -> Unit,
+    onShowBriefing: () -> Unit,
+    onShowChores: () -> Unit,
+    onShowPeople: () -> Unit,
+    onSweep: () -> Unit,
+    onScan: () -> Unit,
+    onReference: () -> Unit,
+    hasCamera: Boolean,
+    onHow: (ChoreEntity) -> Unit,
+) {
+    val context = LocalContext.current
+    val battery = remember { batteryPercent(context) }
+    val processing = viewModel.busy || viewModel.scanning || viewModel.sweeping
+    Box(Modifier.fillMaxSize()) {
         Column(
             modifier = Modifier
                 .align(Alignment.TopCenter)
                 .fillMaxWidth()
-                .padding(10.dp),
-            verticalArrangement = Arrangement.spacedBy(8.dp),
+                .padding(horizontal = 10.dp, vertical = 8.dp),
+            verticalArrangement = Arrangement.spacedBy(6.dp),
         ) {
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                verticalAlignment = Alignment.CenterVertically,
-            ) {
-                Text("Lares", style = MaterialTheme.typography.titleLarge, color = Color.White)
-                Spacer(Modifier.width(10.dp))
+            Row(modifier = Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
                 Text(
-                    viewModel.statusLine,
-                    style = MaterialTheme.typography.bodySmall,
-                    color = Color.White.copy(alpha = 0.85f),
+                    "SYS: NOMINAL // TGT: ${viewModel.clutterIndex / 7}" +
+                        " // RADS: ${viewModel.clutterIndex}% // BAT: $battery%",
+                    fontFamily = HudFont,
+                    fontSize = 12.sp,
+                    color = palette.primary,
                     modifier = Modifier.weight(1f),
                 )
-                if (viewModel.busy || viewModel.scanning || viewModel.sweeping) {
-                    CircularProgressIndicator(modifier = Modifier.height(18.dp).width(18.dp))
+                if (processing) {
+                    Text("*", fontFamily = HudFont, fontSize = 16.sp, color = palette.primary)
                 }
-                IconButton(onClick = { showSettings = true }) {
-                    Icon(Icons.Default.Settings, contentDescription = "Settings", tint = Color.White)
+                IconButton(onClick = onEngageSettings) {
+                    Icon(
+                        Icons.Default.Settings,
+                        contentDescription = "Settings",
+                        tint = palette.primary,
+                    )
                 }
             }
-            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            Text(
+                hud(viewModel.statusLine),
+                fontFamily = HudFont,
+                fontSize = 11.sp,
+                color = palette.dim,
+                modifier = Modifier.fillMaxWidth(),
+            )
+            Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
                 AreaDropdown(viewModel)
                 FilterChip(
                     selected = viewModel.mode == AnalyzeMode.ANALYZE_MODE_DISCOVER,
                     onClick = { viewModel.mode = AnalyzeMode.ANALYZE_MODE_DISCOVER },
-                    label = { Text("Discover") },
+                    label = { Text(hud("A/G"), fontFamily = HudFont) },
                 )
                 FilterChip(
                     selected = viewModel.mode == AnalyzeMode.ANALYZE_MODE_DIFF,
                     onClick = { viewModel.mode = AnalyzeMode.ANALYZE_MODE_DIFF },
-                    label = { Text("Diff") },
+                    label = { Text(hud("DIFF"), fontFamily = HudFont) },
                 )
                 FilterChip(
                     selected = viewModel.autoScan,
                     onClick = { viewModel.autoScan = !viewModel.autoScan },
-                    label = { Text("Auto") },
+                    label = {
+                        Text(hud(if (viewModel.autoScan) "ARM: ARMED" else "ARM: SAFE"), fontFamily = HudFont)
+                    },
                 )
             }
-            BriefingCard(
-                items = viewModel.briefingItems,
-                onExpand = { showBriefing = true },
-            )
+            BriefingCard(items = viewModel.briefingItems, onExpand = onShowBriefing)
         }
 
-        // Bottom overlay: sweep / scan / reference + chores sheet.
+        // Engaged directive bar.
+        viewModel.engagedId?.let { id ->
+            viewModel.choresById[id]?.let { chore ->
+                Text(
+                    hud("ENGAGED: ${chore.action} — TAP TO NEUTRALIZE"),
+                    fontFamily = HudFont,
+                    fontSize = 13.sp,
+                    color = palette.primary,
+                    modifier = Modifier
+                        .align(Alignment.Center)
+                        .background(Color(0xB3000000))
+                        .padding(horizontal = 12.dp, vertical = 6.dp),
+                )
+            }
+        }
+
         Column(
             modifier = Modifier
                 .align(Alignment.BottomCenter)
                 .fillMaxWidth()
                 .padding(16.dp),
             verticalArrangement = Arrangement.spacedBy(8.dp),
-            horizontalAlignment = Alignment.CenterHorizontally,
         ) {
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.spacedBy(8.dp),
-            ) {
+            Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                 Button(
-                    onClick = {
-                        if (viewModel.sweeping) viewModel.endSweep()
-                        else viewModel.startSweep()
-                    },
+                    onClick = onSweep,
                     enabled = hasCamera && !viewModel.busy,
                     modifier = Modifier.weight(1f),
-                ) {
-                    Text(if (viewModel.sweeping) "Stop" else "Sweep")
-                }
+                ) { Text(hud(if (viewModel.sweeping) "STOP" else "SWEEP"), fontFamily = HudFont) }
                 Button(
-                    onClick = { viewModel.captureAndAnalyze(controller, bypassGates = true) },
+                    onClick = onScan,
                     enabled = hasCamera && !viewModel.busy,
                     modifier = Modifier.weight(1f),
-                ) {
-                    Text("Scan")
-                }
+                ) { Text(hud("SCAN"), fontFamily = HudFont) }
                 OutlinedButton(
-                    onClick = { viewModel.captureReference(controller) },
+                    onClick = onReference,
                     enabled = hasCamera && !viewModel.busy,
                     modifier = Modifier.weight(1f),
-                ) {
-                    Text("Ref")
-                }
+                ) { Text(hud("REF"), fontFamily = HudFont) }
             }
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.spacedBy(8.dp),
-            ) {
-                OutlinedButton(
-                    onClick = { showChores = true },
-                    modifier = Modifier.weight(1f),
-                ) {
+            Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                OutlinedButton(onClick = onShowChores, modifier = Modifier.weight(1f)) {
                     val count = viewModel.filteredChores.size
                     val total = viewModel.chores.size
-                    Text(if (viewModel.showAllChores) "Chores ($total)" else "Chores ($count/$total)")
-                }
-                OutlinedButton(
-                    onClick = { showPeople = true },
-                    modifier = Modifier.weight(1f),
-                ) {
-                    Text("People (${viewModel.people.size})")
-                }
-            }
-        }
-    }
-
-    if (showSettings) {
-        SettingsDialog(
-            viewModel = viewModel,
-            onDismiss = { showSettings = false },
-        )
-    }
-
-    howChore?.let { chore ->
-        HowDialog(
-            chore = chore,
-            onDismiss = { howChore = null },
-            onSave = {
-                viewModel.saveSnapshot(context, chore)
-                howChore = null
-            },
-        )
-    }
-
-    if (showChores) {
-        ModalBottomSheet(onDismissRequest = { showChores = false }, sheetState = sheetState) {
-            Column(
-                modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp).padding(bottom = 24.dp),
-                verticalArrangement = Arrangement.spacedBy(8.dp),
-            ) {
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.SpaceBetween,
-                ) {
-                    Text("Chores", style = MaterialTheme.typography.titleMedium)
-                    Row(verticalAlignment = Alignment.CenterVertically) {
-                        Text("All", style = MaterialTheme.typography.labelSmall, color = Color.Gray)
-                        Switch(
-                            checked = viewModel.showAllChores,
-                            onCheckedChange = { viewModel.showAllChores = it },
-                        )
-                    }
-                }
-                val display = viewModel.filteredChores
-                Text("Tasks", style = MaterialTheme.typography.titleSmall)
-                TaskQuickAdd(viewModel)
-                viewModel.tasks.forEach { task ->
-                    Row(
-                        modifier = Modifier.fillMaxWidth(),
-                        verticalAlignment = Alignment.CenterVertically,
-                    ) {
-                        val due = task.dueAtUnix?.let { epoch ->
-                            java.time.Instant.ofEpochSecond(epoch).toString().take(10)
-                        } ?: "no date"
-                        Text(
-                            "$due — ${task.action}",
-                            style = MaterialTheme.typography.bodyMedium,
-                            modifier = Modifier.weight(1f),
-                        )
-                        TextButton(onClick = { viewModel.completeTask(task) }) {
-                            Text("Done")
-                        }
-                    }
-                }
-                HorizontalDivider()
-                Text("Vision chores", style = MaterialTheme.typography.titleSmall)
-                if (display.isEmpty()) {
                     Text(
-                        if (viewModel.chores.isEmpty()) "No chores yet. Scan or sweep the room."
-                        else "All chores are expected here.",
-                        style = MaterialTheme.typography.bodySmall,
+                        hud(if (viewModel.showAllChores) "REGISTRY ($total)" else "REGISTRY ($count/$total)"),
+                        fontFamily = HudFont,
                     )
                 }
-                LazyColumn(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                    items(display) { chore ->
-                        ChoreCard(
-                            chore = chore,
-                            viewModel = viewModel,
-                            onHow = { howChore = chore },
-                            onToggle = { viewModel.setStatus(chore.id, it) },
-                        )
-                    }
+                OutlinedButton(onClick = onShowPeople, modifier = Modifier.weight(1f)) {
+                    Text(hud("CONTACTS (${viewModel.people.size})"), fontFamily = HudFont)
                 }
             }
         }
     }
+}
 
-    if (showPeople) {
-        ModalBottomSheet(onDismissRequest = { showPeople = false }, sheetState = sheetState) {
-            PeopleSheet(viewModel)
+/** The task registry sheet: manual directives + vision targets. */
+@Composable
+private fun ChoreSheetContent(viewModel: MainViewModel, onHow: (ChoreEntity) -> Unit) {
+    Column(
+        modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp).padding(bottom = 24.dp),
+        verticalArrangement = Arrangement.spacedBy(8.dp),
+    ) {
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.SpaceBetween,
+        ) {
+            Text(hud("Task registry"), fontFamily = HudFont, style = MaterialTheme.typography.titleMedium)
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Text(hud("ALL"), fontFamily = HudFont, style = MaterialTheme.typography.labelSmall)
+                Switch(checked = viewModel.showAllChores, onCheckedChange = { viewModel.showAllChores = it })
+            }
         }
-    }
-
-    if (showBriefing) {
-        AlertDialog(
-            onDismissRequest = { showBriefing = false },
-            title = { Text("Coming up") },
-            text = {
-                Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
-                    if (viewModel.briefingItems.isEmpty()) {
-                        Text("Nothing on the horizon.", style = MaterialTheme.typography.bodySmall)
-                    }
-                    viewModel.briefingItems.forEach { item ->
-                        Text(BriefingFormat.format(item), style = MaterialTheme.typography.bodyMedium)
-                    }
-                }
-            },
-            confirmButton = {
-                TextButton(onClick = { showBriefing = false }) { Text("Done") }
-            },
-        )
+        Text(hud("Directives"), fontFamily = HudFont, style = MaterialTheme.typography.titleSmall)
+        TaskQuickAdd(viewModel)
+        viewModel.tasks.forEach { task ->
+            Row(modifier = Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+                val due = task.dueAtUnix?.let { epoch ->
+                    java.time.Instant.ofEpochSecond(epoch).toString().take(10)
+                } ?: "no date"
+                Text(
+                    "$due — ${task.action}",
+                    fontFamily = HudFont,
+                    style = MaterialTheme.typography.bodyMedium,
+                    modifier = Modifier.weight(1f),
+                )
+                TextButton(onClick = { viewModel.completeTask(task) }) { Text(hud("DONE")) }
+            }
+        }
+        HorizontalDivider()
+        Text(hud("Targets"), fontFamily = HudFont, style = MaterialTheme.typography.titleSmall)
+        val display = viewModel.filteredChores
+        if (display.isEmpty()) {
+            Text(
+                hud(
+                    if (viewModel.chores.isEmpty()) "No chores yet. Scan or sweep the room."
+                    else "All chores are expected here.",
+                ),
+                fontFamily = HudFont,
+                style = MaterialTheme.typography.bodySmall,
+            )
+        }
+        LazyColumn(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+            items(display) { chore ->
+                ChoreCard(
+                    chore = chore,
+                    viewModel = viewModel,
+                    onHow = { onHow(chore) },
+                    onToggle = { viewModel.setStatus(chore.id, it) },
+                )
+            }
+        }
     }
 }
 
@@ -471,12 +603,12 @@ private fun RoomArea.displayName(): String = when (this) {
     else -> "Room"
 }
 
-/** Settings dialog: server URL, room, and reference description. */
+/** Settings dialog: server URL, room, reference description, HUD color. */
 @Composable
 private fun SettingsDialog(viewModel: MainViewModel, onDismiss: () -> Unit) {
     AlertDialog(
         onDismissRequest = onDismiss,
-        title = { Text("Settings") },
+        title = { Text(hud("Settings"), fontFamily = HudFont) },
         text = {
             Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
                 OutlinedTextField(
@@ -497,9 +629,22 @@ private fun SettingsDialog(viewModel: MainViewModel, onDismiss: () -> Unit) {
                     label = { Text("Reference description") },
                     singleLine = true,
                 )
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Text(hud("SYMB:"), fontFamily = HudFont, style = MaterialTheme.typography.labelLarge)
+                    FilterChip(
+                        selected = viewModel.hudColor == "amber",
+                        onClick = { viewModel.hudColor = "amber" },
+                        label = { Text(hud("AMBER"), fontFamily = HudFont) },
+                    )
+                    FilterChip(
+                        selected = viewModel.hudColor == "green",
+                        onClick = { viewModel.hudColor = "green" },
+                        label = { Text(hud("GREEN"), fontFamily = HudFont) },
+                    )
+                }
             }
         },
-        confirmButton = { TextButton(onClick = onDismiss) { Text("Done") } },
+        confirmButton = { TextButton(onClick = onDismiss) { Text(hud("Done")) } },
     )
 }
 
@@ -597,25 +742,37 @@ private fun BriefingCard(items: List<BriefingItem>, onExpand: () -> Unit) {
             .fillMaxWidth()
             .clickable { onExpand() },
         colors = CardDefaults.cardColors(
-            containerColor = Color.Black.copy(alpha = 0.55f),
+            containerColor = Color(0x8D000000),
         ),
     ) {
         Column(
-            modifier = Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 8.dp),
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(start = 12.dp, end = 12.dp, top = 8.dp, bottom = 8.dp)
+                .background(
+                    Color.Transparent,
+                ),
             verticalArrangement = Arrangement.spacedBy(2.dp),
         ) {
+            Text(
+                hud("MISSION BOARD"),
+                fontFamily = HudFont,
+                fontSize = 10.sp,
+                letterSpacing = 0.15.sp,
+                modifier = Modifier.padding(bottom = 2.dp),
+            )
             items.take(3).forEach { item ->
                 Text(
-                    BriefingFormat.format(item),
-                    style = MaterialTheme.typography.bodySmall,
-                    color = Color.White,
+                    hud(BriefingFormat.format(item)),
+                    fontFamily = HudFont,
+                    fontSize = 12.sp,
                 )
             }
             if (items.size > 3) {
                 Text(
-                    "+${items.size - 3} more — tap to see all",
-                    style = MaterialTheme.typography.labelSmall,
-                    color = Color.White.copy(alpha = 0.7f),
+                    hud("+${items.size - 3} more — tap to see all"),
+                    fontFamily = HudFont,
+                    fontSize = 10.sp,
                 )
             }
         }
