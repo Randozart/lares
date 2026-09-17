@@ -33,6 +33,16 @@ message AnalyzeSceneRequest {
   repeated bytes sweep_jpegs = 5;
   // Typed room area so the model can reason about object expectations.
   RoomArea room_area = 6;
+  // Which client produced the frame. Enables source-specific policies
+  // (rate limits, reminder matching) later.
+  AnalyzeSource source = 7;
+}
+
+// Origin of an analyze request.
+enum AnalyzeSource {
+  ANALYZE_SOURCE_UNSPECIFIED = 0;
+  ANALYZE_SOURCE_PHONE = 1;
+  ANALYZE_SOURCE_CAMERA_NODE = 2;
 }
 
 // The result of analyzing a frame.

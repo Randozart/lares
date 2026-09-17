@@ -4,15 +4,23 @@
 //! Pure date logic over [`chrono::NaiveDate`]; the caller supplies today's
 //! date so the whole module is deterministically unit-testable.
 
-use crate::domain::{Briefing, BriefingItem, BriefingItemKind, ChoreEntity, ChoreKind, LeadFlag, Occasion, OccasionKind};
+use crate::domain::{
+    Briefing, BriefingItem, BriefingItemKind, ChoreEntity, ChoreKind, LeadFlag, Occasion,
+    OccasionKind, Preparation, PreparationKind, PreparationState,
+};
 use chrono::Datelike;
+use std::collections::{HashMap, HashSet};
 
 /// Default lead time (days before an occasion) to order a gift.
 pub const GIFT_LEAD_DAYS: i64 = 14;
+/// Default lead time (days before an occasion) to put up decorations.
+pub const DECOR_LEAD_DAYS: i64 = 7;
 /// Default lead time (days before an occasion) to order a cake.
 pub const CAKE_LEAD_DAYS: i64 = 2;
 /// Default lead time (days before an occasion) to get a card.
 pub const CARD_LEAD_DAYS: i64 = 1;
+/// Default lead time (days before an occasion) to clean.
+pub const CLEANING_LEAD_DAYS: i64 = 1;
 
 /// Compute the next occurrence of an occasion date from `today`.
 ///
@@ -41,29 +49,93 @@ fn lead_flags(days: i64, is_yearly: bool) -> Vec<i32> {
     if !is_yearly {
         return flags;
     }
-    if days <= GIFT_LEAD_DAYS {
-        flags.push(LeadFlag::Gift as i32);
-    }
-    if days <= CAKE_LEAD_DAYS {
-        flags.push(LeadFlag::Cake as i32);
-    }
-    if days <= CARD_LEAD_DAYS {
-        flags.push(LeadFlag::Card as i32);
+    let candidates: [(i64, LeadFlag); 5] = [
+        (GIFT_LEAD_DAYS, LeadFlag::Gift),
+        (DECOR_LEAD_DAYS, LeadFlag::Decor),
+        (CAKE_LEAD_DAYS, LeadFlag::Cake),
+        (CARD_LEAD_DAYS, LeadFlag::Card),
+        (CLEANING_LEAD_DAYS, LeadFlag::Cleaning),
+    ];
+    for (lead, flag) in candidates {
+        if days <= lead {
+            flags.push(flag as i32);
+        }
     }
     flags
+}
+
+/// Map a preparation kind to its briefing lead flag, when one exists.
+fn kind_flag(kind: i32) -> Option<LeadFlag> {
+    match PreparationKind::try_from(kind) {
+        Ok(PreparationKind::Gift) => Some(LeadFlag::Gift),
+        Ok(PreparationKind::Cake) => Some(LeadFlag::Cake),
+        Ok(PreparationKind::Card) => Some(LeadFlag::Card),
+        Ok(PreparationKind::Decor) => Some(LeadFlag::Decor),
+        Ok(PreparationKind::Cleaning) => Some(LeadFlag::Cleaning),
+        _ => None,
+    }
+}
+
+/// Occasion ids with kinds whose preparations are READY or DONE.
+///
+/// Such preparations silence the matching lead flag on that occasion.
+fn suppression_map(preparations: &[Preparation]) -> HashMap<String, HashSet<i32>> {
+    let mut map: HashMap<String, HashSet<i32>> = HashMap::new();
+    for preparation in preparations {
+        let resolved = preparation.state == PreparationState::Ready as i32
+            || preparation.state == PreparationState::Done as i32;
+        if !resolved || preparation.occasion_id.is_empty() {
+            continue;
+        }
+        if let Some(flag) = kind_flag(preparation.kind) {
+            map.entry(preparation.occasion_id.clone())
+                .or_default()
+                .insert(flag as i32);
+        }
+    }
+    map
+}
+
+/// Convert a due/overdue TASK chore into a briefing item, if in horizon.
+fn task_briefing_item(
+    task: &ChoreEntity,
+    today: chrono::NaiveDate,
+    horizon: i64,
+) -> Option<BriefingItem> {
+    if task.kind != ChoreKind::Task as i32 {
+        return None;
+    }
+    let due = task.due_at_unix?;
+    let date = chrono::DateTime::from_timestamp(due, 0)?.date_naive();
+    let days = (date - today).num_days();
+    if days > horizon {
+        return None;
+    }
+    Some(BriefingItem {
+        title: task.action.clone(),
+        days_until: days as i32,
+        due_date: date.format("%Y-%m-%d").to_string(),
+        kind: BriefingItemKind::Task as i32,
+        flags: Vec::new(),
+    })
 }
 
 /// Build the briefing: occasions and due tasks within `horizon_days`.
 ///
 /// Tasks with overdue due dates are included with negative `days_until`.
+/// Lead flags fire per kind (gift 14d, decor 7d, cake 2d, card/cleaning 1d)
+/// and are suppressed per occasion when a matching preparation is resolved.
 /// Items are sorted by `days_until` ascending.
 pub fn build(
     occasions: &[Occasion],
     tasks: &[ChoreEntity],
+    preparations: &[Preparation],
     today: chrono::NaiveDate,
     horizon_days: i32,
 ) -> Briefing {
     let horizon = i64::from(horizon_days);
+    let suppressions = suppression_map(preparations);
+    let empty = HashSet::new();
     let mut items = Vec::new();
     for occasion in occasions {
         let Some((date, yearly)) = next_occurrence(&occasion.date, today) else {
@@ -73,36 +145,24 @@ pub fn build(
         if days > horizon {
             continue;
         }
+        let suppressed = suppressions.get(&occasion.id).unwrap_or(&empty);
+        let flags: Vec<i32> = lead_flags(days, yearly)
+            .into_iter()
+            .filter(|flag| !suppressed.contains(flag))
+            .collect();
         items.push(BriefingItem {
             title: occasion.title.clone(),
             days_until: days as i32,
             due_date: date.format("%Y-%m-%d").to_string(),
             kind: BriefingItemKind::Occasion as i32,
-            flags: lead_flags(days, yearly),
+            flags,
         });
     }
     for task in tasks {
-        if task.kind != ChoreKind::Task as i32 {
-            continue;
+        let brief = task_briefing_item(task, today, horizon);
+        if let Some(item) = brief {
+            items.push(item);
         }
-        let Some(due) = task.due_at_unix else {
-            continue;
-        };
-        let Some(date) = chrono::DateTime::from_timestamp(due, 0) else {
-            continue;
-        };
-        let date = date.date_naive();
-        let days = (date - today).num_days();
-        if days > horizon {
-            continue;
-        }
-        items.push(BriefingItem {
-            title: task.action.clone(),
-            days_until: days as i32,
-            due_date: date.format("%Y-%m-%d").to_string(),
-            kind: BriefingItemKind::Task as i32,
-            flags: Vec::new(),
-        });
     }
     items.sort_by_key(|item| item.days_until);
     Briefing { items }
@@ -190,17 +250,30 @@ mod tests {
     }
 
     #[test]
-    fn flags_appear_at_each_threshold() {
-        let flags21 = lead_flags(21, true);
-        assert!(flags21.is_empty());
+    fn flags_fire_at_each_threshold() {
+        assert!(lead_flags(21, true).is_empty());
         assert_eq!(lead_flags(14, true), vec![LeadFlag::Gift as i32]);
         assert_eq!(
+            lead_flags(7, true),
+            vec![LeadFlag::Gift as i32, LeadFlag::Decor as i32]
+        );
+        assert_eq!(
             lead_flags(2, true),
-            vec![LeadFlag::Gift as i32, LeadFlag::Cake as i32]
+            vec![
+                LeadFlag::Gift as i32,
+                LeadFlag::Decor as i32,
+                LeadFlag::Cake as i32,
+            ]
         );
         assert_eq!(
             lead_flags(0, true),
-            vec![LeadFlag::Gift as i32, LeadFlag::Cake as i32, LeadFlag::Card as i32]
+            vec![
+                LeadFlag::Gift as i32,
+                LeadFlag::Decor as i32,
+                LeadFlag::Cake as i32,
+                LeadFlag::Card as i32,
+                LeadFlag::Cleaning as i32,
+            ]
         );
         assert!(lead_flags(0, false).is_empty());
     }
@@ -211,10 +284,13 @@ mod tests {
         let soon = yearly_occasion("09-17"); // 2 days out
         let later = yearly_occasion("10-01"); // 16 days out
         let task = task_due(day(2026, 9, 16));
-        let briefing = build(&[later, soon], &[task], today, 30);
+        let briefing = build(&[later, soon], &[task], &[], today, 30);
         let days: Vec<i32> = briefing.items.iter().map(|i| i.days_until).collect();
         assert_eq!(days, vec![1, 2, 16]);
-        assert_eq!(briefing.items[1].flags, vec![LeadFlag::Gift as i32, LeadFlag::Cake as i32]);
+        assert_eq!(
+            briefing.items[1].flags,
+            vec![LeadFlag::Gift as i32, LeadFlag::Decor as i32, LeadFlag::Cake as i32]
+        );
         assert_eq!(briefing.items[0].kind, BriefingItemKind::Task as i32);
     }
 
@@ -222,7 +298,7 @@ mod tests {
     fn overdue_task_included_with_negative_days() {
         let today = day(2026, 9, 15);
         let task = task_due(day(2026, 9, 10));
-        let briefing = build(&[], &[task], today, 7);
+        let briefing = build(&[], &[task], &[], today, 7);
         assert_eq!(briefing.items[0].days_until, -5);
     }
 
@@ -230,7 +306,7 @@ mod tests {
     fn horizon_excludes_far_events() {
         let today = day(2026, 9, 15);
         let far = yearly_occasion("12-01");
-        assert!(build(&[far], &[], today, 7).items.is_empty());
+        assert!(build(&[far], &[], &[], today, 7).items.is_empty());
     }
 
     #[test]
@@ -238,6 +314,54 @@ mod tests {
         let today = day(2026, 9, 15);
         let mut chore = task_due(day(2026, 9, 16));
         chore.kind = ChoreKind::Vision as i32;
-        assert!(build(&[], &[chore], today, 30).items.is_empty());
+        assert!(build(&[], &[chore], &[], today, 30).items.is_empty());
+    }
+
+    #[test]
+    fn resolved_preparation_suppresses_matching_flag() {
+        let today = day(2026, 9, 15);
+        let mut occasion = yearly_occasion("09-17"); // 2 days out
+        occasion.id = "occ1".to_string();
+        let ready_cake = Preparation {
+            id: "pr1".to_string(),
+            occasion_id: "occ1".to_string(),
+            title: "chocolate cake".to_string(),
+            kind: PreparationKind::Cake as i32,
+            state: PreparationState::Ready as i32,
+            ..Default::default()
+        };
+        let briefing = build(&[occasion.clone()], &[], &[ready_cake], today, 30);
+        // CAKE suppressed; GIFT and DECOR still fire at 2 days out.
+        assert_eq!(
+            briefing.items[0].flags,
+            vec![LeadFlag::Gift as i32, LeadFlag::Decor as i32]
+        );
+        // An IDEA preparation does not suppress.
+        let idea = Preparation {
+            id: "pr2".to_string(),
+            occasion_id: "occ1".to_string(),
+            title: "backup cake".to_string(),
+            kind: PreparationKind::Cake as i32,
+            state: PreparationState::Idea as i32,
+            ..Default::default()
+        };
+        let briefing = build(&[occasion], &[], &[idea], today, 30);
+        assert!(briefing.items[0].flags.contains(&(LeadFlag::Cake as i32)));
+    }
+
+    #[test]
+    fn occasion_less_preparations_suppress_nothing() {
+        let today = day(2026, 9, 15);
+        let occasion = yearly_occasion("09-17");
+        let floating = Preparation {
+            id: "pr1".to_string(),
+            person_id: "p1".to_string(),
+            occasion_id: String::new(),
+            title: "chocolate cake".to_string(),
+            kind: PreparationKind::Cake as i32,
+            state: PreparationState::Ready as i32,
+        };
+        let briefing = build(&[occasion], &[], &[floating], today, 30);
+        assert!(briefing.items[0].flags.contains(&(LeadFlag::Cake as i32)));
     }
 }

@@ -10,10 +10,10 @@ use axum::{
 
 use lares_core::diff;
 use lares_core::domain::{
-    now_unix, AnalyzeMode, AnalyzeSceneRequest, AnalyzeSceneResponse, ChoreEntity, ChoreStatus,
-    FingerprintKind, LandmarkList, ListChoresResponse, ListFingerprintsResponse, NudgeRequest,
-    NudgeResponse, ReferenceState, SetChoreStatusRequest, SetFingerprintRequest,
-    SetReferenceRequest,
+    now_unix, AnalyzeMode, AnalyzeSceneRequest, AnalyzeSceneResponse, ChoreEntity, ChoreKind,
+    ChoreStatus, FingerprintKind, LandmarkList, ListChoresResponse, ListFingerprintsResponse,
+    NudgeRequest, NudgeResponse, RecurrenceFreq, ReferenceState, Reminder,
+    SetChoreStatusRequest, SetFingerprintRequest, SetReferenceRequest,
 };
 use lares_core::engine::InferenceError;
 use lares_core::store::StoreError;
@@ -90,11 +90,35 @@ async fn analyze(
     let mut response = state.engine.analyze_scene(req.clone()).await?;
     let chores = diff::postprocess(response.chores, &req.room_id, req.room_area);
     state.store.upsert_chores(&chores).await?;
+    check_forgotten_tasks(&state, &chores).await?;
     if req.mode == AnalyzeMode::Discover as i32 && !response.landmarks.is_empty() {
         state.store.upsert_landmarks(&req.room_id, &response.landmarks).await?;
     }
     response.chores = chores;
     Ok(Json(response))
+}
+
+/// Match a scan's vision output against overdue tasks and store reminders.
+///
+/// Any analyze source can trigger this; camera nodes are simply the
+/// hands-free case. Dedupe and delivery live in the store/client.
+async fn check_forgotten_tasks(state: &AppState, vision: &[ChoreEntity]) -> Result<(), ApiError> {
+    if vision.is_empty() {
+        return Ok(());
+    }
+    let tasks = state.store.list_chores(None).await?;
+    let now = lares_core::domain::now_unix();
+    for forgotten in lares_core::reminders::match_forgotten(&tasks, vision, now) {
+        let reminder = Reminder {
+            id: uuid::Uuid::new_v4().to_string(),
+            task_id: forgotten.task_id,
+            reason: forgotten.reason,
+            created_at_unix: now,
+            delivered: false,
+        };
+        state.store.add_reminder(&reminder).await?;
+    }
+    Ok(())
 }
 
 /// Store a room's agreed target state and reference image.
@@ -140,7 +164,7 @@ async fn list_chores(
     Ok(Json(ListChoresResponse { chores }))
 }
 
-/// Transition a chore's lifecycle state.
+/// Transition a chore's lifecycle state, respawning recurring tasks.
 async fn set_status(
     State(state): State<AppState>,
     Path(id): Path<String>,
@@ -153,7 +177,46 @@ async fn set_status(
         .set_status(&id, status)
         .await?
         .ok_or_else(|| ApiError::not_found("chore not found"))?;
+    spawn_next_recurrence(&state, &chore).await?;
     Ok(Json(chore))
+}
+
+/// Spawn the next instance of a completed recurring task.
+///
+/// The completed instance stays as DONE history; the next one is a fresh
+/// entity with a new id and a due date one period after the previous due.
+async fn spawn_next_recurrence(state: &AppState, chore: &ChoreEntity) -> Result<(), ApiError> {
+    let is_done_task = chore.status == ChoreStatus::Done as i32
+        && chore.kind == ChoreKind::Task as i32;
+    if !is_done_task {
+        return Ok(());
+    }
+    let Some(recurrence) = chore.recurrence.as_ref() else {
+        return Ok(());
+    };
+    let freq = RecurrenceFreq::try_from(recurrence.freq);
+    let step_days = match freq {
+        Ok(RecurrenceFreq::Weekly) => 7,
+        Ok(RecurrenceFreq::Biweekly) => 14,
+        _ => return Ok(()),
+    };
+    let base_due = chore.due_at_unix.unwrap_or_else(lares_core::domain::now_unix);
+    let mut next = ChoreEntity {
+        id: uuid::Uuid::new_v4().to_string(),
+        room_id: chore.room_id.clone(),
+        target: chore.target.clone(),
+        action: chore.action.clone(),
+        estimated_seconds: chore.estimated_seconds,
+        status: ChoreStatus::Discovered as i32,
+        kind: ChoreKind::Task as i32,
+        due_at_unix: Some(base_due + i64::from(step_days) * 86_400),
+        recurrence: chore.recurrence,
+        context_tags: chore.context_tags.clone(),
+        ..Default::default()
+    };
+    crate::people::apply_task_defaults(&mut next);
+    state.store.upsert_chores(std::slice::from_ref(&next)).await?;
+    Ok(())
 }
 
 /// Evaluate the reminder policy against current chores and idle context.

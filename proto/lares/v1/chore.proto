@@ -39,6 +39,21 @@ enum ChoreKind {
   CHORE_KIND_REMINDER = 3;
 }
 
+// How a manual task repeats after completion. Completing a recurring task
+// respawns the next instance with a new id; the old one stays as history.
+enum RecurrenceFreq {
+  RECURRENCE_FREQ_NONE = 0;
+  RECURRENCE_FREQ_WEEKLY = 1;
+  RECURRENCE_FREQ_BIWEEKLY = 2;
+}
+
+// Recurrence schedule for a manual task.
+message Recurrence {
+  RecurrenceFreq freq = 1;
+  // Day of week for weekly/biweekly tasks, 0=Monday .. 6=Sunday.
+  uint32 weekday = 2;
+}
+
 // Typed room area so the model can reason about whether objects are expected.
 enum RoomArea {
   ROOM_AREA_UNSPECIFIED = 0;
@@ -104,6 +119,8 @@ message ChoreEntity {
   int32 object_index = 19;
   // Origin of the chore: vision-detected or manually added.
   ChoreKind kind = 20;
+  // Repeat schedule for manual tasks.
+  Recurrence recurrence = 21;
 }
 
 // A persistent, named spatial anchor in a room (e.g. sink basin, hamper).

@@ -29,6 +29,10 @@ import dev.randozart.lares.proto.FingerprintKind
 import dev.randozart.lares.proto.Landmark
 import dev.randozart.lares.proto.Occasion
 import dev.randozart.lares.proto.Person
+import dev.randozart.lares.proto.Preparation
+import dev.randozart.lares.proto.PreparationKind
+import dev.randozart.lares.proto.PreparationState
+import dev.randozart.lares.proto.RecurrenceFreq
 import dev.randozart.lares.proto.RoomArea
 import dev.randozart.lares.tracking.TrackingEngine
 import kotlinx.coroutines.Dispatchers
@@ -83,6 +87,10 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
     var people by mutableStateOf<List<Person>>(emptyList())
         private set
     var occasions by mutableStateOf<List<Occasion>>(emptyList())
+        private set
+
+    /** Event preparations (gifts, cakes, cards, decor, cleaning). */
+    var preparations by mutableStateOf<List<Preparation>>(emptyList())
         private set
 
     /** Active manual tasks (not done/dismissed). */
@@ -286,6 +294,8 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         loadBriefing()
         refreshPeople()
         refreshOccasions()
+        refreshPreparations()
+        checkReminders()
     }
 
     /** Fetch the proactive briefing digest. */
@@ -321,13 +331,105 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         }
     }
 
-    /** Create a manual task; due date is "YYYY-MM-DD" or empty. */
-    fun addTask(title: String, dueDate: String) {
+    /** Reload the preparations list. */
+    fun refreshPreparations() {
+        viewModelScope.launch {
+            withContext(Dispatchers.IO) {
+                runCatching { client.listPreparations(serverUrl) }
+                    .onSuccess { preparations = it }
+                    .onFailure { }
+            }
+        }
+    }
+
+    /** Add a preparation, auto-linking the person's sole occasion when unambiguous. */
+    fun addPreparation(person: Person, title: String, kind: PreparationKind) {
         if (title.trim().isEmpty()) return
         viewModelScope.launch {
             withContext(Dispatchers.IO) {
                 runCatching {
-                    client.createTask(serverUrl, roomId, title.trim(), parseDueDate(dueDate))
+                    val personOccasions = occasions.filter { it.personId == person.id }
+                    val occasionId = if (personOccasions.size == 1) {
+                        personOccasions.first().id
+                    } else {
+                        ""
+                    }
+                    client.addPreparation(serverUrl, person.id, occasionId, title.trim(), kind)
+                }
+                    .onSuccess {
+                        statusLine = "${it.title} added"
+                        refreshPreparations()
+                        loadBriefing()
+                    }
+                    .onFailure { statusLine = "error: ${it.message}" }
+            }
+        }
+    }
+
+    /** Cycle a preparation IDEA → READY → DONE → delete (restart idea). */
+    fun advancePreparation(preparation: Preparation) {
+        val next = when (preparation.state) {
+            PreparationState.PREPARATION_STATE_IDEA, PreparationState.UNRECOGNIZED ->
+                PreparationState.PREPARATION_STATE_READY
+            PreparationState.PREPARATION_STATE_READY -> PreparationState.PREPARATION_STATE_DONE
+            else -> null
+        }
+        viewModelScope.launch {
+            withContext(Dispatchers.IO) {
+                runCatching {
+                    when (next) {
+                        null -> {
+                            client.deletePreparation(serverUrl, preparation.id)
+                            null
+                        }
+                        else -> client.updatePreparationState(serverUrl, preparation.id, next)
+                    }
+                }
+                    .onSuccess {
+                        refreshPreparations()
+                        loadBriefing()
+                    }
+                    .onFailure { statusLine = "error: ${it.message}" }
+            }
+        }
+    }
+
+    /** Fetch undelivered reminders and surface them in the status line. */
+    fun checkReminders() {
+        viewModelScope.launch {
+            withContext(Dispatchers.IO) {
+                runCatching { client.listUndeliveredReminders(serverUrl) }
+                    .onSuccess { reminders ->
+                        if (reminders.isEmpty()) return@onSuccess
+                        statusLine = "⏰ ${reminders.first().reason}"
+                        reminders.forEach { reminder ->
+                            runCatching {
+                                client.markReminderDelivered(serverUrl, reminder.id)
+                            }
+                        }
+                    }
+                    .onFailure { }
+            }
+        }
+    }
+
+    /** Create a manual task with optional due date, recurrence, and tags. */
+    fun addTask(
+        title: String,
+        dueDate: String,
+        freq: RecurrenceFreq = RecurrenceFreq.RECURRENCE_FREQ_NONE,
+        weekday: Int = 0,
+        shopping: Boolean = false,
+    ) {
+        if (title.trim().isEmpty()) return
+        viewModelScope.launch {
+            withContext(Dispatchers.IO) {
+                runCatching {
+                    val tags = if (shopping) listOf("shopping") else emptyList()
+                    client.createTask(
+                        serverUrl, roomId, title.trim(), parseDueDate(dueDate),
+                        freq, weekday, tags,
+                    )
                 }
                     .onSuccess {
                         statusLine = "task added"

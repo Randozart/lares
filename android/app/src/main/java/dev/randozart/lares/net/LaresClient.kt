@@ -19,7 +19,15 @@ import dev.randozart.lares.proto.Occasion
 import dev.randozart.lares.proto.OccasionList
 import dev.randozart.lares.proto.Person
 import dev.randozart.lares.proto.PersonList
+import dev.randozart.lares.proto.Preparation
+import dev.randozart.lares.proto.PreparationKind
+import dev.randozart.lares.proto.PreparationList
+import dev.randozart.lares.proto.PreparationState
+import dev.randozart.lares.proto.Recurrence
+import dev.randozart.lares.proto.RecurrenceFreq
 import dev.randozart.lares.proto.ReferenceState
+import dev.randozart.lares.proto.Reminder
+import dev.randozart.lares.proto.ReminderList
 import dev.randozart.lares.proto.RoomArea
 import dev.randozart.lares.proto.SetChoreStatusRequest
 import dev.randozart.lares.proto.SetFingerprintRequest
@@ -170,14 +178,29 @@ class LaresClient {
         return builder.build()
     }
 
-    /** Create a manual TASK chore with an optional due date (epoch seconds). */
-    fun createTask(baseUrl: String, roomId: String, title: String, dueAtUnix: Long?): ChoreEntity {
+    /** Create a manual TASK chore with optional due date and recurrence. */
+    fun createTask(
+        baseUrl: String,
+        roomId: String,
+        title: String,
+        dueAtUnix: Long?,
+        freq: RecurrenceFreq = RecurrenceFreq.RECURRENCE_FREQ_NONE,
+        weekday: Int = 0,
+        tags: List<String> = emptyList(),
+    ): ChoreEntity {
         val builder = ChoreEntity.newBuilder()
             .setRoomId(roomId)
             .setTarget(title)
             .setAction(title)
             .setKind(ChoreKind.CHORE_KIND_TASK)
+            .addAllContextTags(tags)
         dueAtUnix?.let { builder.dueAtUnix = it }
+        if (freq != RecurrenceFreq.RECURRENCE_FREQ_NONE) {
+            builder.recurrence = Recurrence.newBuilder()
+                .setFreq(freq)
+                .setWeekday(weekday)
+                .build()
+        }
         val body = post("$baseUrl/v1/chores", printer.print(builder.build()))
         val parsed = ChoreEntity.newBuilder()
         parser.merge(body, parsed)
@@ -237,6 +260,77 @@ class LaresClient {
         val builder = ImportCalendarResponse.newBuilder()
         parser.merge(body, builder)
         return builder.build()
+    }
+
+    /** List preparations, optionally filtered by person and/or occasion. */
+    fun listPreparations(baseUrl: String, personId: String? = null, occasionId: String? = null): List<Preparation> {
+        val params = buildList {
+            personId?.let { add("personId=$it") }
+            occasionId?.let { add("occasionId=$it") }
+        }
+        val suffix = if (params.isEmpty()) "" else "?" + params.joinToString("&")
+        val builder = PreparationList.newBuilder()
+        parser.merge(get("$baseUrl/v1/preparations$suffix"), builder)
+        return builder.build().preparationsList
+    }
+
+    /** Add a preparation (gift, cake, card, decor, cleaning, custom). */
+    fun addPreparation(
+        baseUrl: String,
+        personId: String,
+        occasionId: String,
+        title: String,
+        kind: PreparationKind,
+    ): Preparation {
+        val request = Preparation.newBuilder()
+            .setPersonId(personId)
+            .setOccasionId(occasionId)
+            .setTitle(title)
+            .setKind(kind)
+            .setState(PreparationState.PREPARATION_STATE_IDEA)
+            .build()
+        val body = post("$baseUrl/v1/preparations", printer.print(request))
+        val parsed = Preparation.newBuilder()
+        parser.merge(body, parsed)
+        return parsed.build()
+    }
+
+    /** Advance a preparation's state (IDEA → READY → DONE). */
+    fun updatePreparationState(baseUrl: String, id: String, state: PreparationState): Preparation {
+        val request = Preparation.newBuilder().setState(state).build()
+        val body = patch("$baseUrl/v1/preparations/$id", printer.print(request))
+        val parsed = Preparation.newBuilder()
+        parser.merge(body, parsed)
+        return parsed.build()
+    }
+
+    /** Delete a preparation. */
+    fun deletePreparation(baseUrl: String, id: String) {
+        delete("$baseUrl/v1/preparations/$id")
+    }
+
+    /** List undelivered reminders. */
+    fun listUndeliveredReminders(baseUrl: String): List<Reminder> {
+        val builder = ReminderList.newBuilder()
+        parser.merge(get("$baseUrl/v1/reminders?undelivered=true"), builder)
+        return builder.build().remindersList
+    }
+
+    /** Mark a reminder delivered. */
+    fun markReminderDelivered(baseUrl: String, id: String) {
+        patch("$baseUrl/v1/reminders/$id/delivered", "{}")
+    }
+
+    /** PATCH a protojson body and return the raw response text. */
+    private fun patch(url: String, body: String): String {
+        val request = Request.Builder()
+            .url(url)
+            .patch(body.toRequestBody(jsonType))
+            .build()
+        return http.newCall(request).execute().use { response ->
+            check(response.isSuccessful) { "HTTP ${response.code}: ${response.body?.string()}" }
+            response.body?.string() ?: ""
+        }
     }
 
     /** POST a protojson body and return the raw response text. */

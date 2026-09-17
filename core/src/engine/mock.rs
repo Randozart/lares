@@ -94,6 +94,7 @@ mod tests {
             reference_jpeg: None,
             mode: AnalyzeMode::Discover.into(),
             sweep_jpegs: Vec::new(),
+            source: 0,
             room_area: 0,
         };
         let resp = engine.analyze_scene(req).await.unwrap();
@@ -110,6 +111,7 @@ mod tests {
             reference_jpeg: Some(vec![4, 5, 6]),
             mode: AnalyzeMode::Diff.into(),
             sweep_jpegs: Vec::new(),
+            source: 0,
             room_area: 0,
         };
         let resp = engine.analyze_scene(req).await.unwrap();

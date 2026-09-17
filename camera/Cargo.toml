@@ -1,0 +1,18 @@
+[package]
+name = "lares-camera"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Motion-triggered camera node: pulls an MJPEG stream, posts frames to the Lares server when the scene changes."
+
+[dependencies]
+lares-core.workspace = true
+tokio.workspace = true
+reqwest = { workspace = true, features = ["stream"] }
+futures-util = { version = "0.3", default-features = false }
+image = { version = "0.25", default-features = false, features = ["jpeg"] }
+tracing.workspace = true
+tracing-subscriber.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+base64.workspace = true

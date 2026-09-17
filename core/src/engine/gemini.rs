@@ -28,7 +28,7 @@ use super::{InferenceError, VisionInferenceEngine};
 pub const DEFAULT_MODEL: &str = "gemini-2.5-flash";
 
 /// Longest-side pixel limit for images sent to the model.
-const MAX_INPUT_DIM: u32 = 1280;
+pub(crate) const MAX_INPUT_DIM: u32 = 1280;
 
 /// Base URL for the Gemini REST API.
 const BASE_URL: &str = "https://generativelanguage.googleapis.com/v1beta";
@@ -178,7 +178,7 @@ fn generation_config(model: &str) -> Value {
 ///
 /// Returns the original bytes if decoding or re-encoding fails, so a bad frame
 /// degrades to the previous behavior instead of erroring out.
-fn downscale_jpeg(jpeg: &[u8], max_dim: u32) -> Vec<u8> {
+pub(crate) fn downscale_jpeg(jpeg: &[u8], max_dim: u32) -> Vec<u8> {
     let Ok(source) = image::load_from_memory_with_format(jpeg, image::ImageFormat::Jpeg) else {
         return jpeg.to_vec();
     };
@@ -200,16 +200,16 @@ fn downscale_jpeg(jpeg: &[u8], max_dim: u32) -> Vec<u8> {
 
 /// The envelope the model is expected to return.
 #[derive(Debug, serde::Deserialize)]
-struct RawResponse {
+pub(crate) struct RawResponse {
     chores: Vec<RawChore>,
     #[serde(default)]
     landmarks: Vec<RawLandmark>,
 }
 
 /// A parsed scene: chores plus named spatial anchors.
-struct ParsedScene {
-    chores: Vec<ChoreEntity>,
-    landmarks: Vec<Landmark>,
+pub(crate) struct ParsedScene {
+    pub chores: Vec<ChoreEntity>,
+    pub landmarks: Vec<Landmark>,
 }
 
 /// A single chore as emitted by the model.
@@ -244,6 +244,18 @@ fn default_confidence() -> f32 {
     0.6
 }
 
+/// Parse a scene directly from the model's JSON text output.
+///
+/// Shared with the local engine, whose response also arrives as JSON text.
+pub(crate) fn parse_scene_text(text: &str) -> Result<ParsedScene, InferenceError> {
+    let parsed: RawResponse = serde_json::from_str(text)
+        .map_err(|e| InferenceError::InvalidResponse(format!("json parse: {e}")))?;
+    Ok(ParsedScene {
+        chores: parsed.chores.into_iter().filter_map(raw_to_entity).collect(),
+        landmarks: parsed.landmarks.into_iter().filter_map(raw_to_landmark).collect(),
+    })
+}
+
 /// Extract chores and landmarks from the raw generateContent response.
 fn parse_response(body: Value) -> Result<ParsedScene, InferenceError> {
     let parts = body["candidates"][0]["content"]["parts"]
@@ -262,12 +274,7 @@ fn parse_response(body: Value) -> Result<ParsedScene, InferenceError> {
                 "no text part in response".to_string(),
             )
         })?;
-    let parsed: RawResponse = serde_json::from_str(text)
-        .map_err(|e| InferenceError::InvalidResponse(format!("json parse: {e}")))?;
-    Ok(ParsedScene {
-        chores: parsed.chores.into_iter().filter_map(raw_to_entity).collect(),
-        landmarks: parsed.landmarks.into_iter().filter_map(raw_to_landmark).collect(),
-    })
+    parse_scene_text(text)
 }
 
 /// Convert a raw model chore into a contract entity, skipping malformed rows.
@@ -375,6 +382,7 @@ mod tests {
             mode: AnalyzeMode::Diff.into(),
             sweep_jpegs: Vec::new(),
             room_area: RoomArea::Kitchen.into(),
+            source: 0,
         };
         let body = engine.build_body(&req);
         let parts = body["contents"][0]["parts"].as_array().unwrap();

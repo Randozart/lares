@@ -70,9 +70,14 @@ import dev.randozart.lares.proto.ChoreEntity
 import dev.randozart.lares.proto.ChoreStatus
 import dev.randozart.lares.proto.Occasion
 import dev.randozart.lares.proto.Person
+import dev.randozart.lares.proto.Preparation
+import dev.randozart.lares.proto.PreparationKind
+import dev.randozart.lares.proto.PreparationState
+import dev.randozart.lares.proto.RecurrenceFreq
 import dev.randozart.lares.proto.RoomArea
 import dev.randozart.lares.notify.BriefingFormat
 import dev.randozart.lares.notify.BriefingWorker
+import dev.randozart.lares.notify.ReminderWorker
 import dev.randozart.lares.sensing.SettleDetector
 import dev.randozart.lares.ui.CameraPreview
 import dev.randozart.lares.ui.LiveOverlay
@@ -98,7 +103,7 @@ class MainActivity : ComponentActivity() {
         }
     }
 
-    /** Schedule the daily 08:00 briefing notification. */
+    /** Schedule the daily 08:00 briefing + the 15-min reminder check. */
     private fun scheduleBriefingWork() {
         val now = LocalDateTime.now()
         var next = now.toLocalDate().atTime(LocalTime.of(8, 0))
@@ -106,13 +111,19 @@ class MainActivity : ComponentActivity() {
             next = next.plusDays(1)
         }
         val delayMinutes = Duration.between(now, next).toMinutes()
-        val request = PeriodicWorkRequestBuilder<BriefingWorker>(24, TimeUnit.HOURS)
+        val briefing = PeriodicWorkRequestBuilder<BriefingWorker>(24, TimeUnit.HOURS)
             .setInitialDelay(delayMinutes, TimeUnit.MINUTES)
             .build()
         WorkManager.getInstance(this).enqueueUniquePeriodicWork(
             "lares-briefing",
             ExistingPeriodicWorkPolicy.KEEP,
-            request,
+            briefing,
+        )
+        val reminders = PeriodicWorkRequestBuilder<ReminderWorker>(15, TimeUnit.MINUTES).build()
+        WorkManager.getInstance(this).enqueueUniquePeriodicWork(
+            ReminderWorker.WORK_NAME,
+            ExistingPeriodicWorkPolicy.KEEP,
+            reminders,
         )
     }
 
@@ -616,6 +627,16 @@ private fun BriefingCard(items: List<BriefingItem>, onExpand: () -> Unit) {
 private fun TaskQuickAdd(viewModel: MainViewModel) {
     var title by remember { mutableStateOf("") }
     var due by remember { mutableStateOf("") }
+    var weekly by remember { mutableStateOf(false) }
+    var biweekly by remember { mutableStateOf(false) }
+    var weekday by remember { mutableStateOf(0) }
+    var shopping by remember { mutableStateOf(false) }
+    val freq = when {
+        weekly -> RecurrenceFreq.RECURRENCE_FREQ_WEEKLY
+        biweekly -> RecurrenceFreq.RECURRENCE_FREQ_BIWEEKLY
+        else -> RecurrenceFreq.RECURRENCE_FREQ_NONE
+    }
+    val days = listOf("Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun")
     Row(
         modifier = Modifier.fillMaxWidth(),
         horizontalArrangement = Arrangement.spacedBy(8.dp),
@@ -637,7 +658,7 @@ private fun TaskQuickAdd(viewModel: MainViewModel) {
         )
         Button(
             onClick = {
-                viewModel.addTask(title, due)
+                viewModel.addTask(title, due, freq, weekday, shopping)
                 title = ""
                 due = ""
             },
@@ -645,6 +666,32 @@ private fun TaskQuickAdd(viewModel: MainViewModel) {
         ) {
             Text("Add")
         }
+    }
+    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+        FilterChip(
+            selected = weekly,
+            onClick = { weekly = !weekly; if (weekly) biweekly = false },
+            label = { Text("Weekly") },
+        )
+        FilterChip(
+            selected = biweekly,
+            onClick = { biweekly = !biweekly; if (biweekly) weekly = false },
+            label = { Text("Biweekly") },
+        )
+        if (weekly || biweekly) {
+            days.forEachIndexed { index, day ->
+                FilterChip(
+                    selected = weekday == index,
+                    onClick = { weekday = index },
+                    label = { Text(day) },
+                )
+            }
+        }
+        FilterChip(
+            selected = shopping,
+            onClick = { shopping = !shopping },
+            label = { Text("Shopping") },
+        )
     }
 }
 
@@ -663,7 +710,7 @@ private fun PeopleSheet(viewModel: MainViewModel) {
             verticalArrangement = Arrangement.spacedBy(8.dp),
         ) {
             items(viewModel.people) { person ->
-                PersonCard(person, viewModel.occasions)
+                PersonCard(person, viewModel)
             }
         }
         HorizontalDivider()
@@ -710,9 +757,9 @@ private fun PersonAddRow(viewModel: MainViewModel) {
     }
 }
 
-/** One person with their occasions listed beneath. */
+/** One person with occasions and event preparations listed beneath. */
 @Composable
-private fun PersonCard(person: Person, occasions: List<Occasion>) {
+private fun PersonCard(person: Person, viewModel: MainViewModel) {
     Card(modifier = Modifier.fillMaxWidth()) {
         Column(
             modifier = Modifier.fillMaxWidth().padding(12.dp),
@@ -722,13 +769,70 @@ private fun PersonCard(person: Person, occasions: List<Occasion>) {
             if (person.notes.isNotEmpty()) {
                 Text(person.notes, style = MaterialTheme.typography.bodySmall)
             }
-            occasions.filter { it.personId == person.id }.forEach { occasion ->
+            viewModel.occasions.filter { it.personId == person.id }.forEach { occasion ->
                 Text(
                     "• ${occasion.title} — ${occasion.date}",
                     style = MaterialTheme.typography.bodySmall,
                     color = Color.Gray,
                 )
             }
+            viewModel.preparations.filter { it.personId == person.id }.forEach { preparation ->
+                val stateLabel = when (preparation.state) {
+                    PreparationState.PREPARATION_STATE_IDEA -> "idea"
+                    PreparationState.PREPARATION_STATE_READY -> "ready"
+                    PreparationState.PREPARATION_STATE_DONE -> "done"
+                    else -> "?"
+                }
+                Text(
+                    "☐ $stateLabel: ${preparation.title} — tap to advance",
+                    style = MaterialTheme.typography.bodySmall,
+                    modifier = Modifier.clickable { viewModel.advancePreparation(preparation) },
+                )
+            }
+            PreparationAddRow(person, viewModel)
+        }
+    }
+}
+
+/** Inline form to add a preparation for a person. */
+@Composable
+private fun PreparationAddRow(person: Person, viewModel: MainViewModel) {
+    var title by remember { mutableStateOf("") }
+    var kind by remember { mutableStateOf(PreparationKind.PREPARATION_KIND_GIFT) }
+    Row(
+        modifier = Modifier.fillMaxWidth(),
+        horizontalArrangement = Arrangement.spacedBy(8.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        OutlinedTextField(
+            value = title,
+            onValueChange = { title = it },
+            label = { Text("Prep (gift, cake…)") },
+            singleLine = true,
+            modifier = Modifier.weight(1f),
+        )
+        Button(
+            onClick = {
+                viewModel.addPreparation(person, title, kind)
+                title = ""
+            },
+            enabled = title.isNotBlank(),
+        ) {
+            Text("Add")
+        }
+    }
+    Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+        listOf(
+            "Gift" to PreparationKind.PREPARATION_KIND_GIFT,
+            "Cake" to PreparationKind.PREPARATION_KIND_CAKE,
+            "Card" to PreparationKind.PREPARATION_KIND_CARD,
+            "Decor" to PreparationKind.PREPARATION_KIND_DECOR,
+        ).forEach { (label, value) ->
+            FilterChip(
+                selected = kind == value,
+                onClick = { kind = value },
+                label = { Text(label) },
+            )
         }
     }
 }

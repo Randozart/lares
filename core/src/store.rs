@@ -8,10 +8,9 @@ use std::path::Path;
 
 use sqlx::sqlite::{SqliteConnectOptions, SqlitePoolOptions};
 use sqlx::{Row, SqlitePool};
-
 use crate::domain::{
     now_unix, BoundingBox, ChoreEntity, ChoreStatus, FingerprintKind, FingerprintRecord, Landmark,
-    Occasion, Person, ReferenceState,
+    Occasion, Person, Preparation, Recurrence, ReferenceState, Reminder,
 };
 
 /// Errors produced by the persistence layer.
@@ -48,7 +47,9 @@ const DDL_CHORES: &str = "CREATE TABLE IF NOT EXISTS chores (
     updated_at INTEGER NOT NULL,
     how_to TEXT NOT NULL DEFAULT '',
     due_at INTEGER,
-    kind INTEGER NOT NULL DEFAULT 0
+    kind INTEGER NOT NULL DEFAULT 0,
+    recur_freq INTEGER NOT NULL DEFAULT 0,
+    recur_weekday INTEGER NOT NULL DEFAULT 0
 )";
 
 /// DDL for the room references table.
@@ -107,6 +108,25 @@ const DDL_CALENDAR_SOURCES: &str = "CREATE TABLE IF NOT EXISTS calendar_sources 
     last_synced_unix INTEGER NOT NULL
 )";
 
+/// DDL for the preparations table.
+const DDL_PREPARATIONS: &str = "CREATE TABLE IF NOT EXISTS preparations (
+    id TEXT PRIMARY KEY,
+    person_id TEXT NOT NULL DEFAULT '',
+    occasion_id TEXT NOT NULL DEFAULT '',
+    title TEXT NOT NULL,
+    kind INTEGER NOT NULL,
+    state INTEGER NOT NULL
+)";
+
+/// DDL for the reminders table.
+const DDL_REMINDERS: &str = "CREATE TABLE IF NOT EXISTS reminders (
+    id TEXT PRIMARY KEY,
+    task_id TEXT NOT NULL,
+    reason TEXT NOT NULL,
+    created_at_unix INTEGER NOT NULL,
+    delivered INTEGER NOT NULL DEFAULT 0
+)";
+
 impl Store {
     /// Open (creating if needed) the database under `data_dir`.
     pub async fn connect(data_dir: impl AsRef<Path>) -> Result<Self, StoreError> {
@@ -135,6 +155,8 @@ impl Store {
         self.create_table(DDL_PEOPLE).await?;
         self.create_table(DDL_OCCASIONS).await?;
         self.create_table(DDL_CALENDAR_SOURCES).await?;
+        self.create_table(DDL_PREPARATIONS).await?;
+        self.create_table(DDL_REMINDERS).await?;
         self.ensure_how_to_column().await?;
         self.ensure_chores_phase_h_columns().await?;
         Ok(())
@@ -156,7 +178,7 @@ impl Store {
         Ok(())
     }
 
-    /// Add `due_at` and `kind` columns for manual TASK chores.
+    /// Add `due_at`, `kind`, and recurrence columns for manual TASK chores.
     async fn ensure_chores_phase_h_columns(&self) -> Result<(), StoreError> {
         let rows = sqlx::query("SELECT name FROM pragma_table_info('chores')")
             .fetch_all(&self.pool)
@@ -166,15 +188,17 @@ impl Store {
             .filter_map(|r| r.try_get::<String, _>(0).ok())
             .collect();
         let has = |column: &str| existing.iter().any(|name| name == column);
-        if !has("due_at") {
-            sqlx::query("ALTER TABLE chores ADD COLUMN due_at INTEGER")
-                .execute(&self.pool)
-                .await?;
-        }
-        if !has("kind") {
-            sqlx::query("ALTER TABLE chores ADD COLUMN kind INTEGER NOT NULL DEFAULT 0")
-                .execute(&self.pool)
-                .await?;
+        let alters: &[&str] = &[
+            "ALTER TABLE chores ADD COLUMN due_at INTEGER",
+            "ALTER TABLE chores ADD COLUMN kind INTEGER NOT NULL DEFAULT 0",
+            "ALTER TABLE chores ADD COLUMN recur_freq INTEGER NOT NULL DEFAULT 0",
+            "ALTER TABLE chores ADD COLUMN recur_weekday INTEGER NOT NULL DEFAULT 0",
+        ];
+        let names = ["due_at", "kind", "recur_freq", "recur_weekday"];
+        for (column, ddl) in names.iter().zip(alters.iter()) {
+            if !has(column) {
+                sqlx::query(*ddl).execute(&self.pool).await?;
+            }
         }
         Ok(())
     }
@@ -193,15 +217,16 @@ impl Store {
                 "INSERT INTO chores
                     (id, room_id, target, action, estimated_seconds, status,
                      ymin, xmin, ymax, xmax, confidence, subtasks, updated_at, how_to,
-                     due_at, kind)
-                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                     due_at, kind, recur_freq, recur_weekday)
+                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                  ON CONFLICT(id) DO UPDATE SET
                     room_id=excluded.room_id, target=excluded.target,
                     action=excluded.action, estimated_seconds=excluded.estimated_seconds,
                     status=excluded.status, ymin=excluded.ymin, xmin=excluded.xmin,
                     ymax=excluded.ymax, xmax=excluded.xmax, confidence=excluded.confidence,
                     subtasks=excluded.subtasks, updated_at=excluded.updated_at,
-                    how_to=excluded.how_to, due_at=excluded.due_at, kind=excluded.kind",
+                    how_to=excluded.how_to, due_at=excluded.due_at, kind=excluded.kind,
+                    recur_freq=excluded.recur_freq, recur_weekday=excluded.recur_weekday",
             )
             .bind(&chore.id)
             .bind(&chore.room_id)
@@ -219,6 +244,8 @@ impl Store {
             .bind(serde_json::to_string(&chore.how_to).unwrap_or_default())
             .bind(chore.due_at_unix)
             .bind(chore.kind as i64)
+            .bind(chore.recurrence.as_ref().map(|r| r.freq).unwrap_or(0) as i64)
+            .bind(chore.recurrence.as_ref().map(|r| r.weekday).unwrap_or(0) as i64)
             .execute(&mut *tx)
             .await?;
         }
@@ -542,6 +569,143 @@ impl Store {
         .await?;
         Ok(())
     }
+
+    /// Insert or replace a preparation; returns the stored row.
+    pub async fn upsert_preparation(
+        &self,
+        preparation: &Preparation,
+    ) -> Result<Preparation, StoreError> {
+        sqlx::query(
+            "INSERT INTO preparations (id, person_id, occasion_id, title, kind, state)
+             VALUES (?, ?, ?, ?, ?, ?)
+             ON CONFLICT(id) DO UPDATE SET person_id=excluded.person_id,
+                occasion_id=excluded.occasion_id, title=excluded.title,
+                kind=excluded.kind, state=excluded.state",
+        )
+        .bind(&preparation.id)
+        .bind(&preparation.person_id)
+        .bind(&preparation.occasion_id)
+        .bind(&preparation.title)
+        .bind(preparation.kind as i64)
+        .bind(preparation.state as i64)
+        .execute(&self.pool)
+        .await?;
+        Ok(preparation.clone())
+    }
+
+    /// List preparations, optionally filtered by person and/or occasion.
+    pub async fn list_preparations(
+        &self,
+        person_id: Option<&str>,
+        occasion_id: Option<&str>,
+    ) -> Result<Vec<Preparation>, StoreError> {
+        let rows =
+            sqlx::query("SELECT id, person_id, occasion_id, title, kind, state FROM preparations ORDER BY kind, title")
+                .fetch_all(&self.pool)
+                .await?;
+        let all: Vec<Preparation> = rows
+            .iter()
+            .map(|r| {
+                Ok(Preparation {
+                    id: r.try_get("id")?,
+                    person_id: r.try_get("person_id")?,
+                    occasion_id: r.try_get("occasion_id")?,
+                    title: r.try_get("title")?,
+                    kind: r.try_get::<i64, _>("kind")? as i32,
+                    state: r.try_get::<i64, _>("state")? as i32,
+                })
+            })
+            .collect::<Result<Vec<_>, StoreError>>()?;
+        let matches = |preparation: &Preparation| {
+            let person_ok = person_id.is_none_or(|id| preparation.person_id == id);
+            let occasion_ok = occasion_id.is_none_or(|id| preparation.occasion_id == id);
+            person_ok && occasion_ok
+        };
+        Ok(all.into_iter().filter(matches).collect())
+    }
+
+    /// Delete a preparation; returns whether a row was removed.
+    pub async fn delete_preparation(&self, id: &str) -> Result<bool, StoreError> {
+        let result = sqlx::query("DELETE FROM preparations WHERE id = ?")
+            .bind(id)
+            .execute(&self.pool)
+            .await?;
+        Ok(result.rows_affected() > 0)
+    }
+
+    /// Store a reminder unless an undelivered one already exists for the task.
+    ///
+    /// Returns whether a new row was inserted.
+    pub async fn add_reminder(&self, reminder: &Reminder) -> Result<bool, StoreError> {
+        let existing = sqlx::query(
+            "SELECT COUNT(*) AS n FROM reminders WHERE task_id = ? AND delivered = 0",
+        )
+        .bind(&reminder.task_id)
+        .fetch_one(&self.pool)
+        .await?;
+        let count: i64 = existing.try_get("n")?;
+        if count > 0 {
+            return Ok(false);
+        }
+        sqlx::query(
+            "INSERT INTO reminders (id, task_id, reason, created_at_unix, delivered)
+             VALUES (?, ?, ?, ?, 0)",
+        )
+        .bind(&reminder.id)
+        .bind(&reminder.task_id)
+        .bind(&reminder.reason)
+        .bind(reminder.created_at_unix)
+        .execute(&self.pool)
+        .await?;
+        Ok(true)
+    }
+
+    /// List reminders, newest first, optionally only undelivered ones.
+    pub async fn list_reminders(&self, undelivered_only: bool) -> Result<Vec<Reminder>, StoreError> {
+        let sql = if undelivered_only {
+            "SELECT id, task_id, reason, created_at_unix, delivered FROM reminders
+             WHERE delivered = 0 ORDER BY created_at_unix DESC"
+        } else {
+            "SELECT id, task_id, reason, created_at_unix, delivered FROM reminders
+             ORDER BY created_at_unix DESC"
+        };
+        let rows = sqlx::query(sql).fetch_all(&self.pool).await?;
+        rows.iter()
+            .map(|r| {
+                Ok(Reminder {
+                    id: r.try_get("id")?,
+                    task_id: r.try_get("task_id")?,
+                    reason: r.try_get("reason")?,
+                    created_at_unix: r.try_get("created_at_unix")?,
+                    delivered: r.try_get::<i64, _>("delivered")? != 0,
+                })
+            })
+            .collect()
+    }
+
+    /// Mark a reminder delivered; returns whether a row changed.
+    pub async fn mark_reminder_delivered(&self, id: &str) -> Result<bool, StoreError> {
+        let result = sqlx::query("UPDATE reminders SET delivered = 1 WHERE id = ?")
+            .bind(id)
+            .execute(&self.pool)
+            .await?;
+        Ok(result.rows_affected() > 0)
+    }
+}
+
+/// Decode a chore's recurrence from optional integer columns.
+fn row_recurrence(row: &sqlx::sqlite::SqliteRow) -> Recurrence {
+    let freq = row
+        .try_get::<Option<i64>, _>("recur_freq")
+        .ok()
+        .flatten()
+        .unwrap_or(0) as i32;
+    let weekday = row
+        .try_get::<Option<i64>, _>("recur_weekday")
+        .ok()
+        .flatten()
+        .unwrap_or(0) as u32;
+    Recurrence { freq, weekday }
 }
 
 /// Decode a JSON string list column, tolerating legacy empty values.
@@ -589,6 +753,7 @@ fn row_to_chore(row: &sqlx::sqlite::SqliteRow) -> Result<ChoreEntity, StoreError
             .ok()
             .flatten()
             .unwrap_or(0) as i32,
+        recurrence: Some(row_recurrence(row)),
         ..Default::default()
     })
 }
@@ -638,12 +803,96 @@ fn row_to_fingerprint(row: &sqlx::sqlite::SqliteRow) -> Result<FingerprintRecord
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::domain::{ChoreKind, Recurrence, RecurrenceFreq};
 
     /// Create a store on a fresh temporary directory.
     async fn temp_store() -> (Store, std::path::PathBuf) {
         let dir = std::env::temp_dir().join(format!("lares-test-{}", uuid::Uuid::new_v4()));
         let store = Store::connect(&dir).await.unwrap();
         (store, dir)
+    }
+
+    /// A sample recurring task for persistence tests.
+    fn sample_task() -> ChoreEntity {
+        ChoreEntity {
+            id: "t9".to_string(),
+            room_id: "kitchen".to_string(),
+            target: "trash".to_string(),
+            action: "take out trash".to_string(),
+            status: ChoreStatus::Discovered as i32,
+            kind: ChoreKind::Task as i32,
+            due_at_unix: Some(1_800_000_000),
+            recurrence: Some(Recurrence {
+                freq: RecurrenceFreq::Weekly as i32,
+                weekday: 1,
+            }),
+            ..Default::default()
+        }
+    }
+
+    #[tokio::test]
+    async fn round_trips_recurrence() {
+        let (store, _dir) = temp_store().await;
+        let task = sample_task();
+        store.upsert_chores(std::slice::from_ref(&task)).await.unwrap();
+        let listed = store.list_chores(Some("kitchen")).await.unwrap();
+        assert_eq!(listed.len(), 1);
+        let recurrence = listed[0].recurrence.unwrap();
+        assert_eq!(recurrence.freq, RecurrenceFreq::Weekly as i32);
+        assert_eq!(recurrence.weekday, 1);
+        assert_eq!(listed[0].due_at_unix, Some(1_800_000_000));
+        assert_eq!(listed[0].kind, ChoreKind::Task as i32);
+    }
+
+    #[tokio::test]
+    async fn preparations_round_trip_and_filter() {
+        use crate::domain::{PreparationKind, PreparationState};
+        let (store, _dir) = temp_store().await;
+        let prep = Preparation {
+            id: "pr1".to_string(),
+            person_id: "p1".to_string(),
+            occasion_id: "occ1".to_string(),
+            title: "scarf".to_string(),
+            kind: PreparationKind::Gift as i32,
+            state: PreparationState::Idea as i32,
+        };
+        store.upsert_preparation(&prep).await.unwrap();
+        assert_eq!(store.list_preparations(None, None).await.unwrap().len(), 1);
+        assert_eq!(store.list_preparations(Some("p1"), None).await.unwrap().len(), 1);
+        assert_eq!(store.list_preparations(None, Some("occ1")).await.unwrap().len(), 1);
+        assert!(store.list_preparations(Some("other"), None).await.unwrap().is_empty());
+        let ready = Preparation {
+            state: PreparationState::Ready as i32,
+            ..prep
+        };
+        store.upsert_preparation(&ready).await.unwrap();
+        let listed = store.list_preparations(None, None).await.unwrap();
+        assert_eq!(listed.len(), 1);
+        assert_eq!(listed[0].state, PreparationState::Ready as i32);
+        assert!(store.delete_preparation("pr1").await.unwrap());
+        assert!(store.list_preparations(None, None).await.unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn reminders_dedupe_undelivered() {
+        let (store, _dir) = temp_store().await;
+        let reminder = Reminder {
+            id: "r1".to_string(),
+            task_id: "t9".to_string(),
+            reason: "trash spotted in cam-kitchen".to_string(),
+            created_at_unix: 1_800_000_000,
+            delivered: false,
+        };
+        assert!(store.add_reminder(&reminder).await.unwrap());
+        // Second reminder for the same task is suppressed while undelivered.
+        let duplicate = Reminder { id: "r2".to_string(), ..reminder.clone() };
+        assert!(!store.add_reminder(&duplicate).await.unwrap());
+        assert_eq!(store.list_reminders(false).await.unwrap().len(), 1);
+        assert_eq!(store.list_reminders(true).await.unwrap().len(), 1);
+        assert!(store.mark_reminder_delivered("r1").await.unwrap());
+        assert!(store.list_reminders(true).await.unwrap().is_empty());
+        // After delivery a new reminder is allowed again.
+        assert!(store.add_reminder(&duplicate).await.unwrap());
     }
 
     /// A sample chore for persistence tests.

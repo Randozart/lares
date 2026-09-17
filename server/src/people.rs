@@ -14,8 +14,9 @@ use axum::{
 
 use lares_core::briefing;
 use lares_core::domain::{
-    ChoreEntity, ChoreKind, ChoreStatus, Briefing, ImportCalendarRequest, ImportCalendarResponse,
-    Occasion, OccasionList, OccasionKind, Person, PersonList,
+    Briefing, ChoreEntity, ChoreKind, ChoreStatus, ImportCalendarRequest, ImportCalendarResponse,
+    Occasion, OccasionKind, OccasionList, Person, PersonList, Preparation, PreparationKind,
+    PreparationList, PreparationState, ReminderList,
 };
 use lares_core::ics;
 
@@ -36,10 +37,136 @@ pub fn router(state: AppState) -> Router {
         .route("/v1/people/{id}", delete(delete_person))
         .route("/v1/occasions", get(list_occasions).post(add_occasion))
         .route("/v1/occasions/{id}", delete(delete_occasion))
-        .route("/v1/chores", post(create_chore))
+        .route(
+            "/v1/preparations",
+            get(list_preparations).post(add_preparation),
+        )
+        .route(
+            "/v1/preparations/{id}",
+            axum::routing::patch(update_preparation).delete(delete_preparation),
+        )        .route("/v1/chores", post(create_chore))
         .route("/v1/calendar/import", post(import_calendar))
         .route("/v1/briefing", get(briefing_handler))
+        .route("/v1/reminders", get(list_reminders))
+        .route(
+            "/v1/reminders/{id}/delivered",
+            axum::routing::patch(mark_delivered),
+        )
         .with_state(state)
+}
+
+/// Query parameters for listing reminders.
+#[derive(Debug, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RemindersQuery {
+    /// When true, only undelivered reminders are returned.
+    pub undelivered: Option<bool>,
+}
+
+/// List reminders, optionally only the undelivered ones.
+async fn list_reminders(
+    State(state): State<AppState>,
+    Query(query): Query<RemindersQuery>,
+) -> Result<Json<ReminderList>, ApiError> {
+    let reminders = state
+        .store
+        .list_reminders(query.undelivered.unwrap_or(false))
+        .await?;
+    Ok(Json(ReminderList { reminders }))
+}
+
+/// Mark a reminder as delivered (the client has surfaced it).
+async fn mark_delivered(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+) -> Result<StatusCode, ApiError> {
+    state.store.mark_reminder_delivered(&id).await?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+/// Query parameters for listing preparations.
+#[derive(Debug, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PreparationsQuery {
+    /// Filter by owning person.
+    pub person_id: Option<String>,
+    /// Filter by occasion.
+    pub occasion_id: Option<String>,
+}
+
+/// List preparations, optionally filtered by person and/or occasion.
+async fn list_preparations(
+    State(state): State<AppState>,
+    Query(query): Query<PreparationsQuery>,
+) -> Result<Json<PreparationList>, ApiError> {
+    let preparations = state
+        .store
+        .list_preparations(query.person_id.as_deref(), query.occasion_id.as_deref())
+        .await?;
+    Ok(Json(PreparationList { preparations }))
+}
+
+/// Add a preparation; the server assigns the id.
+async fn add_preparation(
+    State(state): State<AppState>,
+    Json(mut preparation): Json<Preparation>,
+) -> Result<Json<Preparation>, ApiError> {
+    if preparation.title.trim().is_empty() {
+        return Err(ApiError::bad_request("title is required"));
+    }
+    if preparation.id.is_empty() {
+        preparation.id = uuid::Uuid::new_v4().to_string();
+    }
+    if preparation.kind == PreparationKind::Unspecified as i32 {
+        preparation.kind = PreparationKind::Custom as i32;
+    }
+    if preparation.state == PreparationState::Unspecified as i32 {
+        preparation.state = PreparationState::Idea as i32;
+    }
+    let stored = state.store.upsert_preparation(&preparation).await?;
+    Ok(Json(stored))
+}
+
+/// Update a preparation (state advances, fields edit).
+async fn update_preparation(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    Json(mut preparation): Json<Preparation>,
+) -> Result<Json<Preparation>, ApiError> {
+    let existing = state
+        .store
+        .list_preparations(None, None)
+        .await?
+        .into_iter()
+        .find(|candidate| candidate.id == id)
+        .ok_or_else(|| ApiError::not_found("preparation not found"))?;
+    preparation.id = id;
+    if preparation.title.trim().is_empty() {
+        preparation.title = existing.title;
+    }
+    if preparation.person_id.is_empty() {
+        preparation.person_id = existing.person_id;
+    }
+    if preparation.occasion_id.is_empty() {
+        preparation.occasion_id = existing.occasion_id;
+    }
+    if preparation.kind == PreparationKind::Unspecified as i32 {
+        preparation.kind = existing.kind;
+    }
+    if preparation.state == PreparationState::Unspecified as i32 {
+        preparation.state = existing.state;
+    }
+    let stored = state.store.upsert_preparation(&preparation).await?;
+    Ok(Json(stored))
+}
+
+/// Delete a preparation.
+async fn delete_preparation(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+) -> Result<StatusCode, ApiError> {
+    state.store.delete_preparation(&id).await?;
+    Ok(StatusCode::NO_CONTENT)
 }
 
 /// Query parameters for the briefing.
@@ -113,17 +240,10 @@ async fn delete_occasion(
     Ok(StatusCode::NO_CONTENT)
 }
 
-/// Create a manual TASK or REMINDER chore (no vision box required).
-async fn create_chore(
-    State(state): State<AppState>,
-    Json(mut chore): Json<ChoreEntity>,
-) -> Result<Json<ChoreEntity>, ApiError> {
-    if chore.action.trim().is_empty() {
-        return Err(ApiError::bad_request("action is required"));
-    }
-    if chore.id.is_empty() {
-        chore.id = uuid::Uuid::new_v4().to_string();
-    }
+/// Fill sensible defaults on a manually created task entity.
+///
+/// Shared by `create_chore` and the recurrence respawn path.
+pub(crate) fn apply_task_defaults(chore: &mut ChoreEntity) {
     if chore.status == ChoreStatus::Unspecified as i32 {
         chore.status = ChoreStatus::Discovered as i32;
     }
@@ -136,6 +256,23 @@ async fn create_chore(
     if chore.how_to.is_empty() {
         chore.how_to.push(chore.action.clone());
     }
+    if chore.recurrence.is_none() {
+        chore.recurrence = Some(Default::default());
+    }
+}
+
+/// Create a manual TASK or REMINDER chore (no vision box required).
+async fn create_chore(
+    State(state): State<AppState>,
+    Json(mut chore): Json<ChoreEntity>,
+) -> Result<Json<ChoreEntity>, ApiError> {
+    if chore.action.trim().is_empty() {
+        return Err(ApiError::bad_request("action is required"));
+    }
+    if chore.id.is_empty() {
+        chore.id = uuid::Uuid::new_v4().to_string();
+    }
+    apply_task_defaults(&mut chore);
     chore.last_seen_unix = Some(lares_core::domain::now_unix());
     state.store.upsert_chores(std::slice::from_ref(&chore)).await?;
     Ok(Json(chore))
@@ -241,6 +378,7 @@ async fn briefing_handler(
     let today = chrono::Local::now().date_naive();
     let occasions = state.store.list_occasions().await?;
     let chores = state.store.list_chores(None).await?;
+    let preparations = state.store.list_preparations(None, None).await?;
     let horizon = query.horizon_days.unwrap_or(DEFAULT_HORIZON_DAYS as u32) as i32;
     let done = ChoreStatus::Done as i32;
     let dismissed = ChoreStatus::Dismissed as i32;
@@ -250,6 +388,10 @@ async fn briefing_handler(
         .filter(|chore| chore.kind == task && chore.status != done && chore.status != dismissed)
         .collect();
     Ok(Json(briefing::build(
-        &occasions, &active, today, horizon,
+        &occasions,
+        &active,
+        &preparations,
+        today,
+        horizon,
     )))
 }

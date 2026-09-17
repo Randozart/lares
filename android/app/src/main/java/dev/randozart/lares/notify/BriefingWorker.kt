@@ -28,6 +28,8 @@ object BriefingFormat {
                 dev.randozart.lares.proto.LeadFlag.LEAD_FLAG_GIFT -> "gift"
                 dev.randozart.lares.proto.LeadFlag.LEAD_FLAG_CAKE -> "cake"
                 dev.randozart.lares.proto.LeadFlag.LEAD_FLAG_CARD -> "card"
+                dev.randozart.lares.proto.LeadFlag.LEAD_FLAG_DECOR -> "decor"
+                dev.randozart.lares.proto.LeadFlag.LEAD_FLAG_CLEANING -> "cleaning"
                 else -> null
             }
         }

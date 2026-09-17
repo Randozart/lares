@@ -1,12 +1,14 @@
 //! Domain helpers and re-exports over the generated protobuf contract.
 
 pub use crate::lares::v1::{
-    AnalyzeMode, AnalyzeSceneRequest, AnalyzeSceneResponse, Briefing, BriefingItem,
+    AnalyzeMode, AnalyzeSceneRequest, AnalyzeSceneResponse, AnalyzeSource, Briefing, BriefingItem,
     BriefingItemKind, BoundingBox, ChoreEntity, ChoreKind, ChoreStatus, FingerprintKind,
     FingerprintRecord, IdleContext, ImportCalendarRequest, ImportCalendarResponse, Landmark,
     LandmarkList, LeadFlag, ListChoresResponse, ListFingerprintsResponse, Nudge, NudgeRequest,
-    NudgeResponse, Occasion, OccasionKind, OccasionList, Person, PersonList, ReferenceState,
-    RoomArea, SetChoreStatusRequest, SetFingerprintRequest, SetReferenceRequest,
+    NudgeResponse, Occasion, OccasionKind, OccasionList, Person, PersonList, Preparation,
+    PreparationKind, PreparationList, PreparationState, Recurrence, RecurrenceFreq,
+    ReferenceState, Reminder, ReminderList, RoomArea, SetChoreStatusRequest,
+    SetFingerprintRequest, SetReferenceRequest,
 };
 
 /// Lower bound of normalized box coordinates.
