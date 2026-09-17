@@ -231,16 +231,15 @@ fun LaresApp(controller: CameraController) {
     val killAnim = remember { Animatable(1f) }
 
     /**
-     * Neutralize a target: done-status on the server, dual-pulse haptic,
-     * and the 400ms bracket-collapse kill animation.
+     * File a target as a to-do: create on the server, dual-pulse haptic,
+     * and the 400ms bracket-collapse confirmation.
      */
-    fun neutralize(choreId: String) {
-        val target = viewModel.choresById[choreId]?.target ?: "TARGET"
+    fun fileChore(choreId: String) {
+        val target = viewModel.fileTarget(choreId) ?: return
         dualPulseHaptic(context)
-        viewModel.setStatus(choreId, ChoreStatus.CHORE_STATUS_DONE)
         scope.launch {
             killAnim.snapTo(0f)
-            killEffect = KillEffect(choreId, target, 0f)
+            killEffect = KillEffect(choreId, target, 0f, "FILED 1 — SAVED")
             killAnim.animateTo(1f, tween(durationMillis = 400))
             killEffect = null
         }
@@ -266,7 +265,7 @@ fun LaresApp(controller: CameraController) {
                                 offset.x, offset.y, size.width.toFloat(), size.height.toFloat(),
                             )
                             if (killed != null) {
-                                neutralize(killed)
+                                fileChore(killed)
                             }
                         }
                     },
@@ -483,7 +482,7 @@ private fun HudChrome(
         viewModel.engagedId?.let { id ->
             viewModel.choresById[id]?.let { chore ->
                 Text(
-                    hud("ENGAGED: ${chore.action} — TAP TO NEUTRALIZE"),
+                    hud("ENGAGED: ${chore.action} — TAP TO FILE"),
                     fontFamily = HudFont,
                     fontSize = 11.sp,
                     color = palette.primary,

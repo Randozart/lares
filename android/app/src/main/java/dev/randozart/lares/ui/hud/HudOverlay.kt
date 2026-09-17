@@ -22,12 +22,14 @@ import uniffi.lares_tracking.TrackedBox
 
 /** An in-progress kill animation for one target. */
 data class KillEffect(
-    /** The chore id being neutralized. */
+    /** The chore id being resolved. */
     val choreId: String,
-    /** Target label for the SPLASH line. */
+    /** Target label for the flash line. */
     val target: String,
     /** Animation progress, 0..1. */
     val progress: Float,
+    /** Leading tag, e.g. "FILED 1 — SAVED". */
+    val label: String,
 )
 
 /** Fraction of confidence below which targets are not painted. */
@@ -266,7 +268,7 @@ private fun DrawScope.drawKill(
         fontSize = 11.sp,
         color = palette.primary,
     )
-    val splash = "SPLASH 1 // ${effect.target.uppercase()} NEUTRALIZED"
+    val splash = "${effect.label.uppercase()} // ${effect.target.uppercase()}"
     val measured = textMeasurer.measure(splash, style)
     val pos = Offset(
         (size.width - measured.size.width) / 2f,

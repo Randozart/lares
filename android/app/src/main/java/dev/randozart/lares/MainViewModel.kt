@@ -144,6 +144,10 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         }
 
     var chores by mutableStateOf<List<ChoreEntity>>(emptyList())
+
+    /** Ephemeral scan observations: shown on the overlay, not stored until filed. */
+    var scanTargets by mutableStateOf<List<ChoreEntity>>(emptyList())
+        private set
     var trackedBoxes by mutableStateOf<List<TrackedBox>>(emptyList())
     var landmarks by mutableStateOf<List<Landmark>>(emptyList())
     var busy by mutableStateOf(false)
@@ -589,6 +593,25 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         }
     }
 
+    /**
+     * File an ephemeral scan target as a stored to-do. Returns the target
+     * label for feedback, or null when the id is unknown.
+     */
+    fun fileTarget(id: String): String? {
+        val target = scanTargets.firstOrNull { it.id == id } ?: return null
+        viewModelScope.launch {
+            withContext(Dispatchers.IO) {
+                runCatching { client.createChore(serverUrl, target) }
+                    .onSuccess {
+                        scanTargets = scanTargets.filterNot { it.id == id }
+                        refreshChores()
+                    }
+                    .onFailure { statusLine = "error: ${it.message}" }
+            }
+        }
+        return target.target
+    }
+
     /** Parse "YYYY-MM-DD" to epoch seconds at UTC midnight, or null. */
     private fun parseDueDate(text: String): Long? = runCatching {
         LocalDate.parse(text.trim()).atStartOfDay(ZoneOffset.UTC).toEpochSecond()
@@ -653,8 +676,8 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
                 runCatching { client.analyze(serverUrl, roomId, upload, mode, roomArea) }
                     .onSuccess {
                         val responseChores = it.choresList
-                        chores = responseChores
-                        rebuildChoreIndex(responseChores)
+                        scanTargets = responseChores
+                        rebuildChoreIndex(chores, responseChores)
                         buildThumbnails(lastFrameBitmap, responseChores)
                         landmarks = it.landmarksList
                         loadExpected()
@@ -692,8 +715,14 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
 
     /** Rebuild the id -> chore map for overlay labels. */
     private fun rebuildChoreIndex(items: List<ChoreEntity>) {
+        rebuildChoreIndex(items, scanTargets)
+    }
+
+    /** Rebuild the id lookup: stored chores plus ephemeral scan targets. */
+    private fun rebuildChoreIndex(stored: List<ChoreEntity>, ephemeral: List<ChoreEntity>) {
         choresById.clear()
-        items.forEach { choresById[it.id] = it }
+        stored.forEach { choresById[it.id] = it }
+        ephemeral.forEach { choresById[it.id] = it }
     }
 
     /** Crop each chore's bounding box from the frame into a 128x128 thumbnail. */

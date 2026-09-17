@@ -264,6 +264,14 @@ class LaresClient {
         return builder.build()
     }
 
+    /** Store a full chore entity (used when filing a scan target). */
+    fun createChore(baseUrl: String, chore: ChoreEntity): ChoreEntity {
+        val body = post("$baseUrl/v1/chores", printer.print(chore))
+        val parsed = ChoreEntity.newBuilder()
+        parser.merge(body, parsed)
+        return parsed.build()
+    }
+
     /** List preparations, optionally filtered by person and/or occasion. */
     fun listPreparations(baseUrl: String, personId: String? = null, occasionId: String? = null): List<Preparation> {
         val params = buildList {

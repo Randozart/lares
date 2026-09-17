@@ -31,7 +31,7 @@ pub fn router(state: AppState) -> Router {
             "/v1/rooms/{room_id}/reference",
             get(get_reference).post(set_reference),
         )
-        .route("/v1/chores", get(list_chores))
+        .route("/v1/chores", get(list_chores).delete(wipe_chores))
         .route("/v1/chores/{id}/status", patch(set_status))
         .route("/v1/nudge", post(nudge))
         .route(
@@ -91,7 +91,6 @@ async fn analyze(
     }
     let mut response = state.engine.analyze_scene(req.clone()).await?;
     let chores = diff::postprocess(response.chores, &req.room_id, req.room_area);
-    state.store.upsert_chores(&chores).await?;
     check_forgotten_tasks(&state, &chores).await?;
     if req.mode == AnalyzeMode::Discover as i32 && !response.landmarks.is_empty() {
         state.store.upsert_landmarks(&req.room_id, &response.landmarks).await?;
@@ -189,6 +188,24 @@ async fn get_reference(
         .await?
         .ok_or_else(|| ApiError::not_found("reference not found"))?;
     Ok(Json(reference))
+}
+
+
+/// Query parameters for wiping chores.
+#[derive(Debug, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WipeQuery {
+    /// Optional room filter; omit to wipe every room.
+    pub room_id: Option<String>,
+}
+
+/// Delete chores (optionally one room). Returns the number removed.
+async fn wipe_chores(
+    State(state): State<AppState>,
+    Query(query): Query<WipeQuery>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let removed = state.store.wipe_chores(query.room_id.as_deref()).await?;
+    Ok(Json(serde_json::json!({ "removed": removed })))
 }
 
 /// List chores, optionally filtered by room.

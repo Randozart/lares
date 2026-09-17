@@ -581,6 +581,18 @@ impl Store {
         Ok(())
     }
 
+    /// Delete chores (optionally one room). Returns the number removed.
+    pub async fn wipe_chores(&self, room_id: Option<&str>) -> Result<u64, StoreError> {
+        let result = match room_id {
+            Some(id) => sqlx::query("DELETE FROM chores WHERE room_id = ?")
+                .bind(id)
+                .execute(&self.pool)
+                .await?,
+            None => sqlx::query("DELETE FROM chores").execute(&self.pool).await?,
+        };
+        Ok(result.rows_affected())
+    }
+
     /// Insert or replace a preparation; returns the stored row.
     pub async fn upsert_preparation(
         &self,
