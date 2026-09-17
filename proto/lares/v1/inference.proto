@@ -45,6 +45,16 @@ enum AnalyzeSource {
   ANALYZE_SOURCE_CAMERA_NODE = 2;
 }
 
+// Ask which stored room reference a frame matches best.
+message InferRoomRequest {
+  bytes frame_jpeg = 1;
+}
+
+message InferRoomResponse {
+  string room_id = 1;
+  float confidence = 2;
+}
+
 // The result of analyzing a frame.
 message AnalyzeSceneResponse {
   repeated ChoreEntity chores = 1;

@@ -10,6 +10,8 @@ import dev.randozart.lares.proto.ChoreEntity
 import dev.randozart.lares.proto.ChoreKind
 import dev.randozart.lares.proto.ChoreStatus
 import dev.randozart.lares.proto.FingerprintKind
+import dev.randozart.lares.proto.InferRoomRequest
+import dev.randozart.lares.proto.InferRoomResponse
 import dev.randozart.lares.proto.ImportCalendarRequest
 import dev.randozart.lares.proto.ImportCalendarResponse
 import dev.randozart.lares.proto.Landmark
@@ -314,6 +316,17 @@ class LaresClient {
         val builder = ReminderList.newBuilder()
         parser.merge(get("$baseUrl/v1/reminders?undelivered=true"), builder)
         return builder.build().remindersList
+    }
+
+    /** Infer which stored room reference a frame matches best. */
+    fun inferRoom(baseUrl: String, frameJpeg: ByteArray): InferRoomResponse {
+        val request = InferRoomRequest.newBuilder()
+            .setFrameJpeg(ByteString.copyFrom(frameJpeg))
+            .build()
+        val body = post("$baseUrl/v1/rooms/infer", printer.print(request))
+        val builder = InferRoomResponse.newBuilder()
+        parser.merge(body, builder)
+        return builder.build()
     }
 
     /** Mark a reminder delivered. */

@@ -284,6 +284,7 @@ fun LaresApp(controller: CameraController) {
                 },
                 onScan = { viewModel.captureAndAnalyze(controller, bypassGates = true) },
                 onReference = { viewModel.captureReference(controller) },
+                onLocate = { viewModel.inferRoom(controller) },
                 hasCamera = hasCamera,
                 onHow = { howChore = it },
             )
@@ -389,6 +390,7 @@ private fun HudChrome(
     onSweep: () -> Unit,
     onScan: () -> Unit,
     onReference: () -> Unit,
+    onLocate: () -> Unit,
     hasCamera: Boolean,
     onHow: (ChoreEntity) -> Unit,
 ) {
@@ -520,6 +522,13 @@ private fun HudChrome(
                     modifier = Modifier.weight(1f),
                 )
                 HudButton("CONT ${viewModel.people.size}", palette, onShowPeople, modifier = Modifier.weight(1f))
+                HudButton(
+                    "LOC",
+                    palette,
+                    onLocate,
+                    enabled = hasCamera && !viewModel.busy,
+                    modifier = Modifier.weight(1f),
+                )
             }
         }
     }

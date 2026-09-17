@@ -13,6 +13,26 @@ use async_trait::async_trait;
 
 use crate::domain::{AnalyzeSceneRequest, AnalyzeSceneResponse};
 
+/// One labeled room reference offered to room inference.
+#[derive(Debug, Clone)]
+pub struct RoomCandidate {
+    /// The candidate room id.
+    pub room_id: String,
+    /// Free-text description captured with the reference.
+    pub description: String,
+    /// The reference frame, JPEG.
+    pub jpeg: Vec<u8>,
+}
+
+/// The engine's best guess of which room a frame shows.
+#[derive(Debug, Clone, PartialEq)]
+pub struct RoomInference {
+    /// Best-matching room id.
+    pub room_id: String,
+    /// Match confidence, 0.0..1.0.
+    pub confidence: f32,
+}
+
 /// Errors produced by an inference engine.
 #[derive(Debug, thiserror::Error)]
 pub enum InferenceError {
@@ -38,6 +58,19 @@ pub trait VisionInferenceEngine: Send + Sync {
         &self,
         req: AnalyzeSceneRequest,
     ) -> Result<AnalyzeSceneResponse, InferenceError>;
+
+    /// Match a frame against labeled room references to infer the room.
+    ///
+    /// Engines without multimodal matching may leave this unimplemented.
+    async fn infer_room(
+        &self,
+        _frame_jpeg: Vec<u8>,
+        _candidates: &[RoomCandidate],
+    ) -> Result<RoomInference, InferenceError> {
+        Err(InferenceError::Unavailable(
+            "room inference not implemented for this engine".to_string(),
+        ))
+    }
 
     /// Human-readable engine identifier for logs and responses.
     fn name(&self) -> &str;

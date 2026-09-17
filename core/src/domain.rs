@@ -8,7 +8,7 @@ pub use crate::lares::v1::{
     NudgeResponse, Occasion, OccasionKind, OccasionList, Person, PersonList, Preparation,
     PreparationKind, PreparationList, PreparationState, Recurrence, RecurrenceFreq,
     ReferenceState, Reminder, ReminderList, RoomArea, SetChoreStatusRequest,
-    SetFingerprintRequest, SetReferenceRequest,
+    SetFingerprintRequest, SetReferenceRequest, InferRoomRequest, InferRoomResponse,
 };
 
 /// Lower bound of normalized box coordinates.

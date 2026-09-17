@@ -30,6 +30,21 @@ impl VisionInferenceEngine for MockEngine {
         })
     }
 
+    /// Deterministic inference: always the first candidate.
+    async fn infer_room(
+        &self,
+        _frame_jpeg: Vec<u8>,
+        candidates: &[super::RoomCandidate],
+    ) -> Result<super::RoomInference, InferenceError> {
+        let first = candidates.first().ok_or_else(|| {
+            InferenceError::Config("no room references stored".to_string())
+        })?;
+        Ok(super::RoomInference {
+            room_id: first.room_id.clone(),
+            confidence: 0.9,
+        })
+    }
+
     /// Identifier for the mock engine.
     fn name(&self) -> &str {
         "mock"

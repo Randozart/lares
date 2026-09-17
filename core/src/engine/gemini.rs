@@ -36,6 +36,80 @@ const BASE_URL: &str = "https://generativelanguage.googleapis.com/v1beta";
 /// Request timeout for a generateContent call.
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 
+/// System prompt for room inference from references.
+const ROOM_INFER_SYSTEM_PROMPT: &str = "You are a room-matching system. You are given a query \
+image followed by labeled reference images of known rooms. Identify which reference room the \
+query image shows. Judge by fixed structure (walls, windows, fixtures, furniture layout), not \
+by clutter or objects that may have moved. Answer only with JSON matching the schema: the \
+room_id of the best-matching reference and your confidence between 0 and 1. If no reference \
+matches, still pick the closest one and lower the confidence.";
+
+/// User prompt opening for room inference.
+const ROOM_INFER_USER_PROMPT: &str = "The first image is the query. Which labeled reference room is it?";
+
+
+/// Build the generateContent request body for room inference.
+fn build_infer_body(frame_jpeg: Vec<u8>, candidates: &[super::RoomCandidate]) -> Value {
+    let query = downscale_jpeg(&frame_jpeg, MAX_INPUT_DIM);
+    let mut parts = vec![json!({ "text": ROOM_INFER_USER_PROMPT })];
+    parts.push(inline_image(&query));
+    for (index, candidate) in candidates.iter().enumerate() {
+        parts.push(json!({
+            "text": format!(
+                "REFERENCE {} — room_id: {}, description: {}",
+                index + 1,
+                candidate.room_id,
+                candidate.description
+            )
+        }));
+        parts.push(inline_image(&downscale_jpeg(&candidate.jpeg, MAX_INPUT_DIM)));
+    }
+    json!({
+        "system_instruction": { "parts": [ { "text": ROOM_INFER_SYSTEM_PROMPT } ] },
+        "contents": [ { "role": "user", "parts": parts } ],
+        "generationConfig": {
+            "responseMimeType": "application/json",
+            "responseSchema": {
+                "type": "object",
+                "properties": {
+                    "room_id": { "type": "string" },
+                    "confidence": { "type": "number" }
+                },
+                "required": ["room_id", "confidence"]
+            },
+            "maxOutputTokens": 256,
+            "temperature": 0,
+            "thinkingConfig": { "thinkingBudget": 0 }
+        }
+    })
+}
+
+/// Parse the inference reply and validate the room against the candidates.
+fn parse_infer_response(
+    raw: Value,
+    candidates: &[super::RoomCandidate],
+) -> Result<super::RoomInference, InferenceError> {
+    let text = raw["candidates"][0]["content"]["parts"][0]["text"]
+        .as_str()
+        .ok_or_else(|| {
+            InferenceError::InvalidResponse("missing infer text part".to_string())
+        })?;
+    let parsed: Value = serde_json::from_str(text)
+        .map_err(|e| InferenceError::InvalidResponse(format!("infer json: {e}")))?;
+    let room_id = parsed["room_id"]
+        .as_str()
+        .ok_or_else(|| InferenceError::InvalidResponse("missing room_id".to_string()))?
+        .to_string();
+    let known = candidates.iter().any(|candidate| candidate.room_id == room_id);
+    if !known {
+        return Err(InferenceError::InvalidResponse(format!(
+            "model returned unknown room \"{room_id}\""
+        )));
+    }
+    let confidence = parsed["confidence"].as_f64().unwrap_or(0.0) as f32;
+    Ok(super::RoomInference { room_id, confidence })
+}
+
 /// Gemini-backed inference engine.
 pub struct GeminiEngine {
     client: reqwest::Client,
@@ -78,6 +152,22 @@ impl VisionInferenceEngine for GeminiEngine {
             model: self.name().to_string(),
             latency_ms: start.elapsed().as_millis() as u32,
         })
+    }
+
+    /// Match a frame against labeled room references in one call.
+    async fn infer_room(
+        &self,
+        frame_jpeg: Vec<u8>,
+        candidates: &[super::RoomCandidate],
+    ) -> Result<super::RoomInference, InferenceError> {
+        if candidates.is_empty() {
+            return Err(InferenceError::Config(
+                "no room references stored".to_string(),
+            ));
+        }
+        let body = build_infer_body(frame_jpeg, candidates);
+        let raw = self.post(&body).await?;
+        parse_infer_response(raw, candidates)
     }
 
     /// Identifier for the engine.

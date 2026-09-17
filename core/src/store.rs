@@ -330,7 +330,18 @@ impl Store {
         .bind(room_id)
         .fetch_optional(&self.pool)
         .await?;
-        row.map(row_to_reference).transpose()
+        row.as_ref().map(row_to_reference).transpose()
+    }
+
+    /// Fetch every room's reference state, for room inference.
+    pub async fn list_references(&self) -> Result<Vec<ReferenceState>, StoreError> {
+        let rows = sqlx::query(
+            "SELECT room_id, image_id, description, captured_at_unix
+             FROM room_references ORDER BY room_id",
+        )
+        .fetch_all(&self.pool)
+        .await?;
+        rows.iter().map(row_to_reference).collect()
     }
 
     /// Replace a room's landmark set within a single transaction.
@@ -759,7 +770,7 @@ fn row_to_chore(row: &sqlx::sqlite::SqliteRow) -> Result<ChoreEntity, StoreError
 }
 
 /// Convert a room_references table row into a contract entity.
-fn row_to_reference(row: sqlx::sqlite::SqliteRow) -> Result<ReferenceState, StoreError> {
+fn row_to_reference(row: &sqlx::sqlite::SqliteRow) -> Result<ReferenceState, StoreError> {
     Ok(ReferenceState {
         room_id: row.try_get("room_id")?,
         image_id: row.try_get("image_id")?,
@@ -963,6 +974,17 @@ mod tests {
         let loaded = store.get_reference("kitchen").await.unwrap();
         assert_eq!(loaded.unwrap().description, "counters clear, dishes empty");
         assert!(store.get_reference("bathroom").await.unwrap().is_none());
+        // list_references returns every room's reference for inference.
+        let bathroom = ReferenceState {
+            room_id: "bathroom".to_string(),
+            image_id: "img2".to_string(),
+            description: "sink clear".to_string(),
+            captured_at_unix: 1_700_000_100,
+        };
+        store.save_reference(&bathroom).await.unwrap();
+        let all = store.list_references().await.unwrap();
+        assert_eq!(all.len(), 2);
+        assert_eq!(all[0].room_id, "bathroom");
         let _ = std::fs::remove_dir_all(&dir);
     }
 

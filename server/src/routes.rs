@@ -11,10 +11,11 @@ use axum::{
 use lares_core::diff;
 use lares_core::domain::{
     now_unix, AnalyzeMode, AnalyzeSceneRequest, AnalyzeSceneResponse, ChoreEntity, ChoreKind,
-    ChoreStatus, FingerprintKind, LandmarkList, ListChoresResponse, ListFingerprintsResponse,
-    NudgeRequest, NudgeResponse, RecurrenceFreq, ReferenceState, Reminder,
-    SetChoreStatusRequest, SetFingerprintRequest, SetReferenceRequest,
+    ChoreStatus, FingerprintKind, InferRoomRequest, InferRoomResponse, LandmarkList,
+    ListChoresResponse, ListFingerprintsResponse, NudgeRequest, NudgeResponse, RecurrenceFreq,
+    ReferenceState, Reminder, SetChoreStatusRequest, SetFingerprintRequest, SetReferenceRequest,
 };
+use lares_core::engine::RoomCandidate;
 use lares_core::engine::InferenceError;
 use lares_core::store::StoreError;
 
@@ -25,6 +26,7 @@ pub fn router(state: AppState) -> Router {
     let core = Router::new()
         .route("/v1/health", get(health))
         .route("/v1/analyze", post(analyze))
+        .route("/v1/rooms/infer", post(infer_room))
         .route(
             "/v1/rooms/{room_id}/reference",
             get(get_reference).post(set_reference),
@@ -119,6 +121,40 @@ async fn check_forgotten_tasks(state: &AppState, vision: &[ChoreEntity]) -> Resu
         state.store.add_reminder(&reminder).await?;
     }
     Ok(())
+}
+
+/// Infer which stored room reference a frame matches best.
+async fn infer_room(
+    State(state): State<AppState>,
+    Json(req): Json<InferRoomRequest>,
+) -> Result<Json<InferRoomResponse>, ApiError> {
+    if req.frame_jpeg.is_empty() {
+        return Err(ApiError::bad_request("frameJpeg is required"));
+    }
+    let references = state.store.list_references().await?;
+    if references.is_empty() {
+        return Err(ApiError::bad_request(
+            "no room references stored — capture one with REF first",
+        ));
+    }
+    let refs_dir = state.refs_dir();
+    let mut candidates = Vec::with_capacity(references.len());
+    for reference in references {
+        let path = refs_dir.join(format!("{}.jpg", reference.image_id));
+        let jpeg = tokio::fs::read(path)
+            .await
+            .map_err(|e| ApiError::internal(format!("reference read: {e}")))?;
+        candidates.push(RoomCandidate {
+            room_id: reference.room_id,
+            description: reference.description,
+            jpeg,
+        });
+    }
+    let inference = state.engine.infer_room(req.frame_jpeg, &candidates).await?;
+    Ok(Json(InferRoomResponse {
+        room_id: inference.room_id,
+        confidence: inference.confidence,
+    }))
 }
 
 /// Store a room's agreed target state and reference image.

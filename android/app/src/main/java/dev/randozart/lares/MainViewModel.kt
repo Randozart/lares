@@ -298,6 +298,40 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         }
     }
 
+    /**
+     * Snap the live frame and infer the current room from stored references.
+     * On a confident match the room is switched automatically.
+     */
+    fun inferRoom(controller: CameraController) {
+        controller.captureJpeg { jpeg ->
+            if (jpeg == null) {
+                statusLine = "capture failed"
+                return@captureJpeg
+            }
+            viewModelScope.launch {
+                busy = true
+                statusLine = "locating room..."
+                withContext(Dispatchers.IO) {
+                    val upload = downscaleJpeg(jpeg, 1280)
+                    runCatching { client.inferRoom(serverUrl, upload) }
+                        .onSuccess { response ->
+                            roomId = response.roomId
+                            val pct = (response.confidence * 100).toInt()
+                            statusLine = if (pct > 0) {
+                                "ROOM: ${response.roomId.uppercase()} ($pct%)"
+                            } else {
+                                "ROOM: ${response.roomId.uppercase()}"
+                            }
+                            refreshChores()
+                            loadBriefing()
+                        }
+                        .onFailure { statusLine = "locate failed: ${it.message}" }
+                }
+                busy = false
+            }
+        }
+    }
+
     /** Transition a chore's lifecycle state on the server. */
     fun setStatus(id: String, status: ChoreStatus) {
         viewModelScope.launch {
