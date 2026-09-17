@@ -94,6 +94,12 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
     var engagedId by mutableStateOf<String?>(null)
         private set
 
+    /** Inferred room awaiting the user's confirm, if any. */
+    var pendingRoom by mutableStateOf<String?>(null)
+        private set
+
+    private var inferBusy = false
+
     /** Persist connection and HUD settings for the background worker. */
     fun persistPrefs() {
         prefs.edit()
@@ -143,7 +149,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
     var busy by mutableStateOf(false)
     var scanning by mutableStateOf(false)
     var sweeping by mutableStateOf(false)
-    var autoScan by mutableStateOf(false)
+    var autoScan by mutableStateOf(true)
     var statusLine by mutableStateOf("ready — tap Scan or Sweep")
 
     /** Expected object labels for the current room, synced from the server. */
@@ -588,6 +594,53 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         LocalDate.parse(text.trim()).atStartOfDay(ZoneOffset.UTC).toEpochSecond()
     }.getOrNull()
 
+    /**
+     * After a scan: ask the server which stored room reference this frame
+     * matches. When it disagrees with the current room, surface the
+     * "IN <room>?" confirm chip so the user can teach the room.
+     */
+    private fun checkRoomInference(scanJpeg: ByteArray) {
+        if (pendingRoom != null || inferBusy) return
+        inferBusy = true
+        viewModelScope.launch {
+            withContext(Dispatchers.IO) {
+                runCatching { client.inferRoom(serverUrl, downscaleJpeg(scanJpeg, 1280)) }
+                    .onSuccess { response ->
+                        val candidate = response.roomId.trim()
+                        if (candidate.isNotEmpty() && !candidate.equals(roomId, ignoreCase = true)) {
+                            pendingRoom = candidate
+                        }
+                    }
+                    .onFailure { }
+            }
+            inferBusy = false
+        }
+    }
+
+    /**
+     * Resolve the room confirm chip. Accepting switches to the inferred room
+     * and stores the current frame as its reference, teaching inference.
+     */
+    fun confirmRoom(accept: Boolean) {
+        val candidate = pendingRoom ?: return
+        pendingRoom = null
+        if (!accept) return
+        roomId = candidate
+        viewModelScope.launch {
+            withContext(Dispatchers.IO) {
+                val bitmap = lastFrameBitmap ?: return@withContext
+                val bytes = ByteArrayOutputStream().also { out ->
+                    bitmap.compress(Bitmap.CompressFormat.JPEG, 80, out)
+                }.toByteArray()
+                runCatching {
+                    client.setReference(serverUrl, candidate, "auto-learned $candidate reference", bytes)
+                }
+                    .onSuccess { statusLine = "LEARNED ROOM: ${candidate.uppercase()}" }
+                    .onFailure { statusLine = "learn failed: ${it.message}" }
+            }
+        }
+    }
+
     /** Send the captured frame to the slow loop and store the response. */
     private fun analyze(jpeg: ByteArray, anchor: GrayFrame?) {
         viewModelScope.launch {
@@ -621,6 +674,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
             postFingerprint()
             refreshChores()
             loadBriefing()
+            checkRoomInference(jpeg)
         }
     }
 
@@ -749,6 +803,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
             postFingerprint()
             refreshChores()
             loadBriefing()
+            frames.lastOrNull()?.let { checkRoomInference(it) }
         }
     }
 

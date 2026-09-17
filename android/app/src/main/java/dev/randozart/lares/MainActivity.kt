@@ -460,6 +460,22 @@ private fun HudChrome(
                     viewModel.autoScan = !viewModel.autoScan
                 }
             }
+            viewModel.pendingRoom?.let { candidate ->
+                Row(
+                    horizontalArrangement = Arrangement.spacedBy(6.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    Text(
+                        hud("IN ${candidate.uppercase()}?"),
+                        fontFamily = HudFont,
+                        fontSize = 11.sp,
+                        color = palette.primary,
+                        modifier = Modifier.weight(1f, fill = false),
+                    )
+                    HudButton("YES", palette, { viewModel.confirmRoom(true) }, filled = true)
+                    HudButton("NO", palette, { viewModel.confirmRoom(false) })
+                }
+            }
             BriefingCard(items = viewModel.briefingItems, onExpand = onShowBriefing)
         }
 
