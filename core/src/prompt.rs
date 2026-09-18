@@ -130,7 +130,7 @@ pub fn response_schema() -> Value {
             },
             "landmarks": {
                 "type": "array",
-                "description": "Stable named anchors in the room (sink, hamper, sofa, table)",
+                "description": "Stable named anchors and task-relevant appliances in the room (sink, hamper, sofa, table, washing machine, dryer, dishwasher, oven, stove). Appliances imply recurring household tasks.",
                 "items": {
                     "type": "object",
                     "properties": {

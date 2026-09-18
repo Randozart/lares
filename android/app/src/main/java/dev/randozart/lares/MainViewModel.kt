@@ -56,6 +56,15 @@ private const val MAX_SWEEP_FRAMES = 6
 /** Log tag for the fast loop debug output. */
 private const val TAG = "LaresVM"
 
+/** Landmark label → (display label, task action) for common task spaces. */
+private val APPLIANCE_TASKS = mapOf(
+    "washing machine" to ("LAUNDRY" to "Do laundry"),
+    "dishwasher" to ("DISHWASHER" to "Run or unload dishwasher"),
+    "dryer" to ("DRYER" to "Fold and put away laundry"),
+    "oven" to ("OVEN" to "Clean oven"),
+    "stove" to ("STOVE" to "Clean stovetop"),
+)
+
 /**
  * UI state for the fast loop: live tracked boxes, the cost-guard auto-scan
  * state machine, and the chore/landmark overlay derived from the slow loop.
@@ -96,6 +105,10 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
 
     /** Inferred room awaiting the user's confirm, if any. */
     var pendingRoom by mutableStateOf<String?>(null)
+        private set
+
+    /** Common-task-space suggestion awaiting user action, if any. */
+    var pendingSuggestion by mutableStateOf<String?>(null)
         private set
 
     private var inferBusy = false
@@ -664,6 +677,41 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         }
     }
 
+    /**
+     * After a scan: check if any landmark matches a task-relevant appliance
+     * and surface a suggestion chip (e.g. "LAUNDRY?").
+     */
+    private fun checkTaskSuggestions() {
+        if (pendingSuggestion != null) return
+        val match = landmarks.firstOrNull {
+            APPLIANCE_TASKS.containsKey(it.label.lowercase())
+        } ?: return
+        val label = APPLIANCE_TASKS[match.label.lowercase()]?.first ?: return
+        pendingSuggestion = label
+    }
+
+    /** File the suggested task as a stored to-do. */
+    fun fileSuggestion() {
+        val label = pendingSuggestion ?: return
+        val entry = APPLIANCE_TASKS.values.firstOrNull { it.first == label } ?: return
+        pendingSuggestion = null
+        viewModelScope.launch {
+            withContext(Dispatchers.IO) {
+                runCatching { client.createTask(serverUrl, roomId, entry.second, null) }
+                    .onSuccess {
+                        refreshChores()
+                        loadBriefing()
+                    }
+                    .onFailure { statusLine = "error: ${it.message}" }
+            }
+        }
+    }
+
+    /** Dismiss the current task suggestion. */
+    fun dismissSuggestion() {
+        pendingSuggestion = null
+    }
+
     /** Send the captured frame to the slow loop and store the response. */
     private fun analyze(jpeg: ByteArray, anchor: GrayFrame?) {
         viewModelScope.launch {
@@ -698,6 +746,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
             refreshChores()
             loadBriefing()
             checkRoomInference(jpeg)
+            checkTaskSuggestions()
             postHudState(scanTargets.size)
         }
     }
@@ -843,6 +892,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
             refreshChores()
             loadBriefing()
             frames.lastOrNull()?.let { checkRoomInference(it) }
+            checkTaskSuggestions()
             postHudState(items.size)
         }
     }

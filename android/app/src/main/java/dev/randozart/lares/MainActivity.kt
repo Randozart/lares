@@ -170,6 +170,7 @@ fun LaresApp(controller: CameraController) {
     var showChores by remember { mutableStateOf(false) }
     var showPeople by remember { mutableStateOf(false) }
     var showBriefing by remember { mutableStateOf(false) }
+    var showMissionLog by remember { mutableStateOf(true) }
     val sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
     var hasCamera by remember {
         mutableStateOf(
@@ -484,7 +485,25 @@ private fun HudChrome(
                     HudButton("NO", palette, { viewModel.confirmRoom(false) })
                 }
             }
-            BriefingCard(items = viewModel.briefingItems, onExpand = onShowBriefing)
+            viewModel.pendingSuggestion?.let { label ->
+                Row(
+                    horizontalArrangement = Arrangement.spacedBy(6.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    Text(
+                        hud("$label?"),
+                        fontFamily = HudFont,
+                        fontSize = 11.sp,
+                        color = palette.primary,
+                        modifier = Modifier.weight(1f, fill = false),
+                    )
+                    HudButton("FILE", palette, { viewModel.fileSuggestion() }, filled = true)
+                    HudButton("NO", palette, { viewModel.dismissSuggestion() })
+                }
+            }
+            if (showMissionLog) {
+                BriefingCard(items = viewModel.briefingItems, onExpand = onShowBriefing)
+            }
         }
 
         // Engaged directive bar.
@@ -559,6 +578,7 @@ private fun HudChrome(
                     onTorch,
                     modifier = Modifier.weight(1f),
                 )
+                HudToggle("LOG", showMissionLog, palette) { showMissionLog = !showMissionLog }
             }
         }
     }
