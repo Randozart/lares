@@ -294,6 +294,8 @@ fun LaresApp(controller: CameraController) {
                 },
                 hasCamera = hasCamera,
                 onHow = { howChore = it },
+                showMissionLog = showMissionLog,
+                onToggleLog = { showMissionLog = !showMissionLog },
             )
         }
 
@@ -402,6 +404,8 @@ private fun HudChrome(
     torchLabel: String,
     hasCamera: Boolean,
     onHow: (ChoreEntity) -> Unit,
+    showMissionLog: Boolean,
+    onToggleLog: () -> Unit,
 ) {
     val context = LocalContext.current
     val processing = viewModel.busy || viewModel.scanning || viewModel.sweeping
@@ -578,7 +582,7 @@ private fun HudChrome(
                     onTorch,
                     modifier = Modifier.weight(1f),
                 )
-                HudToggle("LOG", showMissionLog, palette) { showMissionLog = !showMissionLog }
+                HudToggle("LOG", showMissionLog, palette, onClick = onToggleLog)
             }
         }
     }

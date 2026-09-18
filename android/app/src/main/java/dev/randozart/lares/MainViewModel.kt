@@ -893,7 +893,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
             loadBriefing()
             frames.lastOrNull()?.let { checkRoomInference(it) }
             checkTaskSuggestions()
-            postHudState(items.size)
+            postHudState(chores.size)
         }
     }
 
