@@ -28,4 +28,5 @@ pub mod ics;
 pub mod nudge;
 pub mod prompt;
 pub mod reminders;
+pub mod rooms;
 pub mod store;

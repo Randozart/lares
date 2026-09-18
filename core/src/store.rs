@@ -391,6 +391,28 @@ impl Store {
         rows.iter().map(row_to_landmark).collect()
     }
 
+    /// Landmark label profiles for every room that has stored landmarks.
+    ///
+    /// Used by landmark-based room inference: each room's accumulated labels
+    /// form the profile a scan's landmarks are matched against.
+    pub async fn landmark_profiles(&self) -> Result<Vec<(String, Vec<String>)>, StoreError> {
+        let rows = sqlx::query(
+            "SELECT room_id, label FROM room_landmarks ORDER BY room_id, label",
+        )
+        .fetch_all(&self.pool)
+        .await?;
+        let mut profiles: Vec<(String, Vec<String>)> = Vec::new();
+        for row in rows {
+            let room_id: String = row.try_get("room_id")?;
+            let label: String = row.try_get("label")?;
+            match profiles.last_mut() {
+                Some((owner, labels)) if *owner == room_id => labels.push(label),
+                _ => profiles.push((room_id, vec![label])),
+            }
+        }
+        Ok(profiles)
+    }
+
     /// Store a scene fingerprint, capping HISTORY kind to the newest 20.
     pub async fn save_fingerprint(
         &self,

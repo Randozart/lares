@@ -65,6 +65,15 @@ private val APPLIANCE_TASKS = mapOf(
     "stove" to ("STOVE" to "Clean stovetop"),
 )
 
+/** A room candidate the user has dismissed, with the dismissal timestamp. */
+private data class DismissedRoom(val roomId: String, val atMs: Long)
+
+/** Milliseconds a dismissed room candidate stays suppressed. */
+private const val ROOM_COOLDOWN_MS = 5 * 60 * 1000L
+
+/** A pending room suggestion: the candidate and the landmarks that matched. */
+data class PendingRoom(val roomId: String, val evidence: List<String>)
+
 /**
  * UI state for the fast loop: live tracked boxes, the cost-guard auto-scan
  * state machine, and the chore/landmark overlay derived from the slow loop.
@@ -103,8 +112,8 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
     var engagedId by mutableStateOf<String?>(null)
         private set
 
-    /** Inferred room awaiting the user's confirm, if any. */
-    var pendingRoom by mutableStateOf<String?>(null)
+    /** Inferred room awaiting the user's confirm, with its landmark evidence. */
+    var pendingRoom by mutableStateOf<PendingRoom?>(null)
         private set
 
     /** Common-task-space suggestion awaiting user action, if any. */
@@ -112,6 +121,9 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         private set
 
     private var inferBusy = false
+
+    /** Room candidates dismissed via NO, keyed by room id (cooldown window). */
+    private val dismissedRooms = mutableMapOf<String, DismissedRoom>()
 
     /** Persist connection and HUD settings for the background worker. */
     fun persistPrefs() {
@@ -366,18 +378,13 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         }
     }
 
-    /** Reload the persisted chore list and landmark set from the server. */
+    /** Reload the persisted chore list from the server. */
     fun refreshChores() {
         viewModelScope.launch {
             withContext(Dispatchers.IO) {
                 runCatching { client.listChores(serverUrl, roomId) }
                     .onSuccess { chores = it; rebuildChoreIndex(it) }
                     .onFailure { statusLine = "error: ${it.message}" }
-            }
-            withContext(Dispatchers.IO) {
-                runCatching { client.getLandmarks(serverUrl, roomId) }
-                    .onSuccess { landmarks = it }
-                    .onFailure { }
             }
         }
     }
@@ -631,21 +638,33 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
     }.getOrNull()
 
     /**
-     * After a scan: ask the server which stored room reference this frame
-     * matches. When it disagrees with the current room, surface the
-     * "IN <room>?" confirm chip so the user can teach the room.
+     * After a scan: ask the server which room this scan matches. The server
+     * uses the scan's landmarks when they are decisive (instant) and falls
+     * back to comparing the frame against stored references. When the
+     * inferred room disagrees with the current room — and is not in its
+     * dismissal cooldown — surface the "KITCHEN? (FRIDGE, ...)" chip.
      */
-    private fun checkRoomInference(scanJpeg: ByteArray) {
+    private fun checkRoomInference(scanJpeg: ByteArray, scanLandmarks: List<String>) {
         if (pendingRoom != null || inferBusy) return
         inferBusy = true
         viewModelScope.launch {
             withContext(Dispatchers.IO) {
-                runCatching { client.inferRoom(serverUrl, downscaleJpeg(scanJpeg, 1280)) }
+                runCatching {
+                    client.inferRoom(serverUrl, downscaleJpeg(scanJpeg, 1280), scanLandmarks)
+                }
                     .onSuccess { response ->
                         val candidate = response.roomId.trim()
-                        if (candidate.isNotEmpty() && !candidate.equals(roomId, ignoreCase = true)) {
-                            pendingRoom = candidate
+                        if (candidate.isEmpty() || candidate.equals(roomId, ignoreCase = true)) {
+                            return@onSuccess
                         }
+                        val dismissed = dismissedRooms[candidate]
+                        if (dismissed != null &&
+                            SystemClock.elapsedRealtime() - dismissed.atMs < ROOM_COOLDOWN_MS
+                        ) {
+                            return@onSuccess
+                        }
+                        if (dismissed != null) dismissedRooms.remove(candidate)
+                        pendingRoom = PendingRoom(candidate, response.evidenceList)
                     }
                     .onFailure { }
             }
@@ -660,8 +679,12 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
     fun confirmRoom(accept: Boolean) {
         val candidate = pendingRoom ?: return
         pendingRoom = null
-        if (!accept) return
-        roomId = candidate
+        if (!accept) {
+            dismissedRooms[candidate.roomId] =
+                DismissedRoom(candidate.roomId, SystemClock.elapsedRealtime())
+            return
+        }
+        roomId = candidate.roomId
         viewModelScope.launch {
             withContext(Dispatchers.IO) {
                 val bitmap = lastFrameBitmap ?: return@withContext
@@ -669,9 +692,9 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
                     bitmap.compress(Bitmap.CompressFormat.JPEG, 80, out)
                 }.toByteArray()
                 runCatching {
-                    client.setReference(serverUrl, candidate, "auto-learned $candidate reference", bytes)
+                    client.setReference(serverUrl, candidate.roomId, "auto-learned ${candidate.roomId} reference", bytes)
                 }
-                    .onSuccess { statusLine = "LEARNED ROOM: ${candidate.uppercase()}" }
+                    .onSuccess { statusLine = "LEARNED ROOM: ${candidate.roomId.uppercase()}" }
                     .onFailure { statusLine = "learn failed: ${it.message}" }
             }
         }
@@ -720,6 +743,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
             busy = true
             scanning = true
             statusLine = "analyzing..."
+            var scanLandmarks: List<String> = emptyList()
             withContext(Dispatchers.IO) {
                 val upload = downscaleJpeg(jpeg, 1280)
                 lastFrameBitmap = BitmapFactory.decodeByteArray(upload, 0, upload.size)
@@ -730,6 +754,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
                         rebuildChoreIndex(chores, responseChores)
                         buildThumbnails(lastFrameBitmap, responseChores)
                         landmarks = it.landmarksList
+                        scanLandmarks = it.landmarksList.map { landmark -> landmark.label }
                         checkTaskSuggestions(it.landmarksList)
                         loadExpected()
                         if (anchor != null) {
@@ -748,7 +773,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
             postFingerprint()
             refreshChores()
             loadBriefing()
-            checkRoomInference(jpeg)
+            checkRoomInference(jpeg, scanLandmarks)
             postHudState(scanTargets.size)
         }
     }
@@ -867,6 +892,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         viewModelScope.launch {
             busy = true
             statusLine = "analyzing sweep..."
+            var sweepLandmarks: List<String> = emptyList()
             withContext(Dispatchers.IO) {
                 runCatching { client.analyzeSweep(serverUrl, roomId, frames, roomArea) }
                     .onSuccess {
@@ -875,6 +901,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
                         rebuildChoreIndex(items)
                         landmarks = it.landmarksList
                         checkTaskSuggestions(it.landmarksList)
+                        sweepLandmarks = it.landmarksList.map { landmark -> landmark.label }
                         lastFrameBitmap = frames.lastOrNull()
                             ?.let { b -> BitmapFactory.decodeByteArray(b, 0, b.size) }
                         buildThumbnails(lastFrameBitmap, items)
@@ -894,7 +921,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
             postFingerprint()
             refreshChores()
             loadBriefing()
-            frames.lastOrNull()?.let { checkRoomInference(it) }
+            frames.lastOrNull()?.let { checkRoomInference(it, sweepLandmarks) }
             postHudState(chores.size)
         }
     }

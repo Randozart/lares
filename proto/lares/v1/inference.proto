@@ -48,11 +48,16 @@ enum AnalyzeSource {
 // Ask which stored room reference a frame matches best.
 message InferRoomRequest {
   bytes frame_jpeg = 1;
+  // Landmark labels from the current scan; when >= 2 are present the server
+  // infers the room by matching stored landmark profiles (no VLM call).
+  repeated string landmarks = 2;
 }
 
 message InferRoomResponse {
   string room_id = 1;
   float confidence = 2;
+  // Landmarks that matched the winning room (empty for vision inference).
+  repeated string evidence = 3;
 }
 
 // The result of analyzing a frame.

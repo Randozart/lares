@@ -124,13 +124,31 @@ async fn check_forgotten_tasks(state: &AppState, vision: &[ChoreEntity]) -> Resu
     Ok(())
 }
 
-/// Infer which stored room reference a frame matches best.
+/// Infer which room a frame or landmark set matches best.
+///
+/// Landmark path (free, instant): with >= 2 landmark labels the scan is
+/// matched against per-room landmark profiles accumulated from past scans.
+/// Vision path (fallback): the frame is compared against stored room
+/// reference images by the engine.
 async fn infer_room(
     State(state): State<AppState>,
     Json(req): Json<InferRoomRequest>,
 ) -> Result<Json<InferRoomResponse>, ApiError> {
+    if req.landmarks.len() >= 2 {
+        let profiles = state.store.landmark_profiles().await?;
+        if let Some(m) = lares_core::rooms::infer_from_landmarks(&req.landmarks, &profiles) {
+            let hits = m.evidence.len() as f32;
+            return Ok(Json(InferRoomResponse {
+                room_id: m.room_id,
+                confidence: hits / req.landmarks.len() as f32,
+                evidence: m.evidence,
+            }));
+        }
+    }
     if req.frame_jpeg.is_empty() {
-        return Err(ApiError::bad_request("frameJpeg is required"));
+        return Err(ApiError::bad_request(
+            "frameJpeg is required when landmark inference is unavailable",
+        ));
     }
     let references = state.store.list_references().await?;
     if references.is_empty() {
@@ -155,6 +173,7 @@ async fn infer_room(
     Ok(Json(InferRoomResponse {
         room_id: inference.room_id,
         confidence: inference.confidence,
+        evidence: Vec::new(),
     }))
 }
 

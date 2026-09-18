@@ -478,8 +478,16 @@ private fun HudChrome(
                     horizontalArrangement = Arrangement.spacedBy(6.dp),
                     verticalAlignment = Alignment.CenterVertically,
                 ) {
+                    val evidence = candidate.evidence
+                        .take(2)
+                        .joinToString(", ") { it.uppercase() }
+                    val chipText = if (evidence.isEmpty()) {
+                        "IN ${candidate.roomId.uppercase()}?"
+                    } else {
+                        "${candidate.roomId.uppercase()}? ($evidence)"
+                    }
                     Text(
-                        hud("IN ${candidate.uppercase()}?"),
+                        hud(chipText),
                         fontFamily = HudFont,
                         fontSize = 11.sp,
                         color = palette.primary,

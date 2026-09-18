@@ -326,10 +326,11 @@ class LaresClient {
         return builder.build().remindersList
     }
 
-    /** Infer which stored room reference a frame matches best. */
-    fun inferRoom(baseUrl: String, frameJpeg: ByteArray): InferRoomResponse {
+    /** Infer the room from scan landmarks (fast path) and/or a frame (vision fallback). */
+    fun inferRoom(baseUrl: String, frameJpeg: ByteArray, landmarks: List<String> = emptyList()): InferRoomResponse {
         val request = InferRoomRequest.newBuilder()
             .setFrameJpeg(ByteString.copyFrom(frameJpeg))
+            .addAllLandmarks(landmarks)
             .build()
         val body = post("$baseUrl/v1/rooms/infer", printer.print(request))
         val builder = InferRoomResponse.newBuilder()
