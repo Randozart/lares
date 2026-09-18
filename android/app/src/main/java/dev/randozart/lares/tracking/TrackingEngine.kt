@@ -50,8 +50,13 @@ class TrackingEngine(subsample: UInt = 2u) {
     fun fingerprint(frame: GrayFrame): ByteArray = tracker.fingerprint(frame)
 
     /** Hamming distance between two fingerprints (0 = identical scene). */
-    fun fingerprintDistance(a: ByteArray, b: ByteArray): UInt =
-        tracker.fingerprintDistance(ByteBuffer.wrap(a), ByteBuffer.wrap(b))
+    fun fingerprintDistance(a: ByteArray, b: ByteArray): UInt {
+        val bufA = ByteBuffer.allocateDirect(a.size).put(a)
+        bufA.flip()
+        val bufB = ByteBuffer.allocateDirect(b.size).put(b)
+        bufB.flip()
+        return tracker.fingerprintDistance(bufA, bufB)
+    }
 
     /** Crop a landmark patch from a frame. */
     fun patch(frame: GrayFrame, box: TrackedBox): ImagePatch = tracker.patch(frame, box)

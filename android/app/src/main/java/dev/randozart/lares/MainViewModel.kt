@@ -681,13 +681,15 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
      * After a scan: check if any landmark matches a task-relevant appliance
      * and surface a suggestion chip (e.g. "LAUNDRY?").
      */
-    private fun checkTaskSuggestions() {
+    private fun checkTaskSuggestions(scanned: List<Landmark>) {
+        Log.d(TAG, "suggest check: ${scanned.size} landmarks ${scanned.map { it.label }}")
         if (pendingSuggestion != null) return
-        val match = landmarks.firstOrNull {
+        val match = scanned.firstOrNull {
             APPLIANCE_TASKS.containsKey(it.label.lowercase())
         } ?: return
         val label = APPLIANCE_TASKS[match.label.lowercase()]?.first ?: return
         pendingSuggestion = label
+        Log.d(TAG, "suggestion: $label")
     }
 
     /** File the suggested task as a stored to-do. */
@@ -728,6 +730,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
                         rebuildChoreIndex(chores, responseChores)
                         buildThumbnails(lastFrameBitmap, responseChores)
                         landmarks = it.landmarksList
+                        checkTaskSuggestions(it.landmarksList)
                         loadExpected()
                         if (anchor != null) {
                             engine.anchor(anchor, choreBoxes(responseChores))
@@ -746,7 +749,6 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
             refreshChores()
             loadBriefing()
             checkRoomInference(jpeg)
-            checkTaskSuggestions()
             postHudState(scanTargets.size)
         }
     }
@@ -872,6 +874,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
                         chores = items
                         rebuildChoreIndex(items)
                         landmarks = it.landmarksList
+                        checkTaskSuggestions(it.landmarksList)
                         lastFrameBitmap = frames.lastOrNull()
                             ?.let { b -> BitmapFactory.decodeByteArray(b, 0, b.size) }
                         buildThumbnails(lastFrameBitmap, items)
@@ -892,7 +895,6 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
             refreshChores()
             loadBriefing()
             frames.lastOrNull()?.let { checkRoomInference(it) }
-            checkTaskSuggestions()
             postHudState(chores.size)
         }
     }
