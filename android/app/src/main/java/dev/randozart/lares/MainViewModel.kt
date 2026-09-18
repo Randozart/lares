@@ -698,6 +698,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
             refreshChores()
             loadBriefing()
             checkRoomInference(jpeg)
+            postHudState(scanTargets.size)
         }
     }
 
@@ -709,6 +710,15 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
                 runCatching {
                     client.setFingerprint(serverUrl, roomId, FingerprintKind.FINGERPRINT_KIND_LATEST, fingerprint)
                 }.onFailure { }
+            }
+        }
+    }
+
+    /** Fire-and-forget: post scan-target count for the HUD firmware. */
+    private fun postHudState(targetCount: Int) {
+        viewModelScope.launch {
+            withContext(Dispatchers.IO) {
+                runCatching { client.postHudState(serverUrl, roomId, targetCount) }.onFailure { }
             }
         }
     }
@@ -833,6 +843,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
             refreshChores()
             loadBriefing()
             frames.lastOrNull()?.let { checkRoomInference(it) }
+            postHudState(items.size)
         }
     }
 

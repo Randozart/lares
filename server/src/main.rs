@@ -40,6 +40,7 @@ async fn main() {
         policy: Arc::new(NoopPolicy),
         store,
         data_dir: std::path::PathBuf::from(data_dir),
+        hud_state: Arc::new(tokio::sync::Mutex::new(lares_core::domain::HudState::default())),
     };
 
     let mut app = routes::router(app_state);

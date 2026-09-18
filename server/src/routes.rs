@@ -11,9 +11,10 @@ use axum::{
 use lares_core::diff;
 use lares_core::domain::{
     now_unix, AnalyzeMode, AnalyzeSceneRequest, AnalyzeSceneResponse, ChoreEntity, ChoreKind,
-    ChoreStatus, FingerprintKind, InferRoomRequest, InferRoomResponse, LandmarkList,
-    ListChoresResponse, ListFingerprintsResponse, NudgeRequest, NudgeResponse, RecurrenceFreq,
-    ReferenceState, Reminder, SetChoreStatusRequest, SetFingerprintRequest, SetReferenceRequest,
+    ChoreStatus, FingerprintKind, HudResponse, HudTask, InferRoomRequest, InferRoomResponse,
+    LandmarkList, ListChoresResponse, ListFingerprintsResponse, NudgeRequest, NudgeResponse,
+    RecurrenceFreq, ReferenceState, Reminder, SetChoreStatusRequest, SetFingerprintRequest,
+    SetReferenceRequest,
 };
 use lares_core::engine::RoomCandidate;
 use lares_core::engine::InferenceError;
@@ -34,6 +35,7 @@ pub fn router(state: AppState) -> Router {
         .route("/v1/chores", get(list_chores).delete(wipe_chores))
         .route("/v1/chores/{id}/status", patch(set_status))
         .route("/v1/nudge", post(nudge))
+        .route("/v1/hud", get(hud_get).post(hud_post_state))
         .route(
             "/v1/rooms/{room_id}/landmarks",
             get(get_landmarks),
@@ -367,6 +369,63 @@ async fn remove_expected(
 ) -> Result<StatusCode, ApiError> {
     state.store.remove_expected(&room_id, &label).await?;
     Ok(StatusCode::NO_CONTENT)
+}
+
+/// Request body for the phone to post ephemeral scan-target state.
+#[derive(Debug, serde::Deserialize)]
+pub struct HudStateRequest {
+    /// The room the phone inferred for the current location.
+    pub room_id: String,
+    /// Number of scan-targets the client is currently tracking.
+    pub target_count: u32,
+}
+
+/// Phone posts live scan-target count after each scan (fire-and-forget).
+async fn hud_post_state(
+    State(state): State<AppState>,
+    Json(req): Json<HudStateRequest>,
+) -> Result<StatusCode, ApiError> {
+    let mut hud = state.hud_state.lock().await;
+    hud.room_id = req.room_id;
+    hud.target_count = req.target_count;
+    hud.updated_at_unix = now_unix();
+    Ok(StatusCode::NO_CONTENT)
+}
+
+/// Minimal HUD payload for the ESP32 firmware to poll every few seconds.
+async fn hud_get(State(state): State<AppState>) -> Result<Json<HudResponse>, ApiError> {
+    let hud = state.hud_state.lock().await.clone();
+    let chores = state.store.list_chores(None).await?;
+    let today = chrono::Local::now().date_naive();
+    let done = ChoreStatus::Done as i32;
+    let dismissed = ChoreStatus::Dismissed as i32;
+    let task = ChoreKind::Task as i32;
+    let horizon = 30_i64;
+    let mut tasks: Vec<HudTask> = chores
+        .iter()
+        .filter(|c| c.kind == task && c.status != done && c.status != dismissed)
+        .filter_map(|c| {
+            let due = c.due_at_unix?;
+            let date = chrono::DateTime::from_timestamp(due, 0)?.date_naive();
+            let days = (date - today).num_days();
+            if days > horizon {
+                return None;
+            }
+            let mut title = c.action.clone();
+            title.truncate(40);
+            Some(HudTask { title, days: days as i32 })
+        })
+        .collect();
+    tasks.sort_by_key(|t| t.days);
+    let next_task = tasks.first().cloned();
+    tasks.truncate(3);
+    Ok(Json(HudResponse {
+        room: hud.room_id,
+        targets: hud.target_count,
+        next_task,
+        tasks,
+        updated_at: hud.updated_at_unix,
+    }))
 }
 
 /// Load the stored reference image for a room, if any.

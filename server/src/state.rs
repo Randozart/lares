@@ -3,6 +3,7 @@
 use std::path::PathBuf;
 use std::sync::Arc;
 
+use lares_core::domain::HudState;
 use lares_core::engine::VisionInferenceEngine;
 use lares_core::nudge::ReminderPolicy;
 use lares_core::store::Store;
@@ -18,6 +19,8 @@ pub struct AppState {
     pub store: Store,
     /// Directory for stored frame/reference images.
     pub data_dir: PathBuf,
+    /// Live HUD state posted by the phone (in-memory, restarts clear it).
+    pub hud_state: Arc<tokio::sync::Mutex<HudState>>,
 }
 
 impl AppState {

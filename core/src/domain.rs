@@ -65,6 +65,41 @@ pub fn new_chore_id() -> String {
     uuid::Uuid::new_v4().to_string()
 }
 
+/// Live HUD state posted by the phone after each scan.
+#[derive(Debug, Clone, Default)]
+pub struct HudState {
+    /// Last room the phone inferred for the current location.
+    pub room_id: String,
+    /// Number of ephemeral scan-targets currently tracked by the client.
+    pub target_count: u32,
+    /// Unix timestamp of the last post (to detect stale data).
+    pub updated_at_unix: i64,
+}
+
+/// The lightweight JSON payload the HUD firmware polls every few seconds.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct HudResponse {
+    /// Last posted room (empty if no scan has fired yet).
+    pub room: String,
+    /// Live scan-target count from the phone.
+    pub targets: u32,
+    /// The next due task (title + days until), if any.
+    pub next_task: Option<HudTask>,
+    /// Up to 3 top-priority tasks for the mini ticker.
+    pub tasks: Vec<HudTask>,
+    /// Unix timestamp of the last state update.
+    pub updated_at: i64,
+}
+
+/// A single task line in the HUD payload.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct HudTask {
+    /// Short title (truncated to 40 chars).
+    pub title: String,
+    /// Days until due (negative = overdue).
+    pub days: i32,
+}
+
 /// Coarse grid cell for a box center, used for near-duplicate collapsing.
 ///
 /// Returns `(row, col)` in units of `cell`. Guards against a zero cell size.

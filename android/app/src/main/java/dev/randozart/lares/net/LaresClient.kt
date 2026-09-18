@@ -337,6 +337,12 @@ class LaresClient {
         return builder.build()
     }
 
+    /** Post the live scan-target state for the HUD firmware to poll. */
+    fun postHudState(baseUrl: String, roomId: String, targetCount: Int) {
+        val body = """{"roomId":"${roomId.replace("\"", "\\\"")}","targetCount":$targetCount}"""
+        send("$baseUrl/v1/hud", body)
+    }
+
     /** Mark a reminder delivered. */
     fun markReminderDelivered(baseUrl: String, id: String) {
         patch("$baseUrl/v1/reminders/$id/delivered", "{}")
