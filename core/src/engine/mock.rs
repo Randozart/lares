@@ -27,6 +27,7 @@ impl VisionInferenceEngine for MockEngine {
             landmarks: Vec::new(),
             model: self.name().to_string(),
             latency_ms: start.elapsed().as_millis() as u32,
+            scene_class: String::new(),
         })
     }
 

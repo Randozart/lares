@@ -345,16 +345,18 @@ impl Store {
     }
 
     /// Replace a room's landmark set within a single transaction.
+    /// Merge landmarks into a room's profile.
+    ///
+    /// Accumulative: existing labels are kept (their boxes may be refreshed),
+    /// new labels are added, and nothing is deleted — profiles grow richer
+    /// across scans so landmark-based room inference gets more decisive over
+    /// time. Prune stale labels separately if a profile ever needs trimming.
     pub async fn upsert_landmarks(
         &self,
         room_id: &str,
         landmarks: &[Landmark],
     ) -> Result<(), StoreError> {
         let mut tx = self.pool.begin().await?;
-        sqlx::query("DELETE FROM room_landmarks WHERE room_id = ?")
-            .bind(room_id)
-            .execute(&mut *tx)
-            .await?;
         let mut seen = std::collections::HashSet::new();
         for landmark in landmarks {
             if !seen.insert(landmark.label.clone()) {
@@ -363,7 +365,11 @@ impl Store {
             sqlx::query(
                 "INSERT INTO room_landmarks
                     (room_id, label, ymin, xmin, ymax, xmax, updated_at)
-                 VALUES (?, ?, ?, ?, ?, ?, ?)",
+                 VALUES (?, ?, ?, ?, ?, ?, ?)
+                 ON CONFLICT(room_id, label) DO UPDATE SET
+                    ymin = excluded.ymin, xmin = excluded.xmin,
+                    ymax = excluded.ymax, xmax = excluded.xmax,
+                    updated_at = excluded.updated_at",
             )
             .bind(room_id)
             .bind(&landmark.label)
@@ -1031,16 +1037,20 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn landmarks_round_trip_and_replace() {
+    async fn landmarks_round_trip_and_merge() {
         let (store, dir) = temp_store().await;
         store.upsert_landmarks("kitchen", &[sample_landmark("sink"), sample_landmark("hamper")]).await.unwrap();
         let loaded = store.get_landmarks("kitchen").await.unwrap();
         assert_eq!(loaded.len(), 2);
         assert_eq!(loaded[0].label, "hamper");
+        // Accumulative: a later scan with fewer landmarks keeps the old ones
+        // and refreshes the shared label's box.
         store.upsert_landmarks("kitchen", &[sample_landmark("sink")]).await.unwrap();
         let reloaded = store.get_landmarks("kitchen").await.unwrap();
-        assert_eq!(reloaded.len(), 1);
-        assert_eq!(reloaded[0].label, "sink");
+        assert_eq!(reloaded.len(), 2, "existing labels must survive a merge");
+        assert!(reloaded.iter().any(|l| l.label == "hamper"));
+        let sink = reloaded.iter().find(|l| l.label == "sink").unwrap();
+        assert_eq!(sink.r#box, sample_landmark("sink").r#box);
         let _ = std::fs::remove_dir_all(&dir);
     }
 

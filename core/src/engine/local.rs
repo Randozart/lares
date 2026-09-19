@@ -125,6 +125,7 @@ impl LocalEngine {
             landmarks: scene.landmarks,
             model: self.model.clone(),
             latency_ms: start.elapsed().as_millis() as u32,
+            scene_class: String::new(),
         })
     }
 }

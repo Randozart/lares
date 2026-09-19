@@ -69,6 +69,8 @@ message AnalyzeSceneResponse {
   uint32 latency_ms = 3;
   // Named spatial anchors discovered in the frame (DISCOVER mode only).
   repeated Landmark landmarks = 4;
+  // Zero-shot room class from the frozen-vision sidecar (CLIP), if configured.
+  string scene_class = 5;
 }
 
 // A request to store a room's agreed target state.

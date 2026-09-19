@@ -41,6 +41,9 @@ async fn main() {
         store,
         data_dir: std::path::PathBuf::from(data_dir),
         hud_state: Arc::new(tokio::sync::Mutex::new(lares_core::domain::HudState::default())),
+        frozen: std::env::var("LARES_VISION_ENDPOINT").ok().map(|endpoint| {
+            std::sync::Arc::new(lares_core::engine::frozen::FrozenVision::new(endpoint))
+        }),
     };
 
     let mut app = routes::router(app_state);

@@ -92,6 +92,7 @@ async fn analyze(
         req.reference_jpeg = load_reference(&state, &req.room_id).await?;
     }
     let mut response = state.engine.analyze_scene(req.clone()).await?;
+    enrich_with_frozen(&state, &req, &mut response).await;
     let chores = diff::postprocess(response.chores, &req.room_id, req.room_area);
     check_forgotten_tasks(&state, &chores).await?;
     if req.mode == AnalyzeMode::Discover as i32 && !response.landmarks.is_empty() {
@@ -100,6 +101,59 @@ async fn analyze(
     response.chores = chores;
     Ok(Json(response))
 }
+
+/// Enrich a scan with the frozen-vision sidecar when configured.
+///
+/// Two additions: OWLv2 landmark detections merged into the response's
+/// landmark list (so room profiles stay populated even when the VLM returns
+/// none, e.g. dark frames), and a CLIP scene class for diagnostics. All
+/// sidecar failures degrade silently to plain VLM behaviour.
+async fn enrich_with_frozen(
+    state: &AppState,
+    req: &AnalyzeSceneRequest,
+    response: &mut AnalyzeSceneResponse,
+) {
+    let Some(frozen) = state.frozen.as_ref() else {
+        return;
+    };
+    if req.frame_jpeg.is_empty() || req.mode != AnalyzeMode::Discover as i32 {
+        return;
+    }
+    match frozen.detect(&req.frame_jpeg, FROZEN_DETECT_THRESHOLD).await {
+        Ok(detections) => {
+            tracing::info!(count = detections.len(), "frozen detections");
+            response.landmarks =
+                diff::merge_landmarks(&response.landmarks, &detections, FROZEN_DETECT_THRESHOLD);
+        }
+        Err(e) => tracing::warn!(error = %e, "frozen detect failed"),
+    }
+    match frozen.classify_room(&req.frame_jpeg, SCENE_CLASSES).await {
+        Ok(room) => {
+            tracing::info!(room = %room.room, confidence = room.confidence, "frozen scene class");
+            response.scene_class = room.room;
+        }
+        Err(e) => tracing::warn!(error = %e, "frozen room classify failed"),
+    }
+}
+
+/// Minimum OWLv2 score for a detection to count as a landmark.
+const FROZEN_DETECT_THRESHOLD: f32 = 0.3;
+
+/// Candidate captions for the frozen CLIP room classification.
+const SCENE_CLASSES: &[&str] = &[
+    "kitchen",
+    "bedroom",
+    "living room",
+    "office",
+    "bathroom",
+    "hallway",
+    "dining room",
+    "garage",
+    "attic",
+    "basement",
+    "balcony",
+    "garden",
+];
 
 /// Match a scan's vision output against overdue tasks and store reminders.
 ///

@@ -8,7 +8,7 @@ use std::collections::HashMap;
 
 use crate::domain::{
     box_is_degenerate, center_cell, clamp_box, new_chore_id, now_unix, ChoreEntity, ChoreStatus,
-    DEFAULT_MIN_CONFIDENCE,
+    Landmark, DEFAULT_MIN_CONFIDENCE,
 };
 
 /// Grid cell size (in normalized units) for near-duplicate collapsing.
@@ -107,10 +107,63 @@ fn dedupe_key(chore: &ChoreEntity) -> (String, i32, i32) {
     }
 }
 
+/// Merge frozen-detector landmarks into a VLM scan's landmark list.
+///
+/// Detector labels are normalized to bare nouns ("a dishwasher" becomes
+/// "dishwasher") so they join the per-room profiles and the client's task-
+/// space map. VLM landmarks win on duplicate labels; detections below
+/// `min_score` are dropped. Returns the merged list in stable order.
+pub fn merge_landmarks(
+    vlm: &[Landmark],
+    detections: &[crate::engine::frozen::FrozenDetection],
+    min_score: f32,
+) -> Vec<Landmark> {
+    let mut merged: Vec<Landmark> = Vec::with_capacity(vlm.len() + detections.len());
+    let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+    for landmark in vlm {
+        seen.insert(landmark.label.trim().to_lowercase());
+        merged.push(landmark.clone());
+    }
+    for detection in detections {
+        if detection.score < min_score {
+            continue;
+        }
+        let label = normalize_query_label(&detection.label);
+        if label.is_empty() || !seen.insert(label.clone()) {
+            continue;
+        }
+        merged.push(Landmark {
+            label,
+            r#box: Some(crate::domain::BoundingBox {
+                ymin: detection.r#box[0],
+                xmin: detection.r#box[1],
+                ymax: detection.r#box[2],
+                xmax: detection.r#box[3],
+            }),
+        });
+    }
+    merged
+}
+
+/// Reduce an open-vocabulary query to a bare noun label.
+///
+/// "a dishwasher" -> "dishwasher", "an oven" -> "oven"; anything left with
+/// fewer than two characters is rejected.
+fn normalize_query_label(query: &str) -> String {
+    let trimmed = query.trim();
+    let stripped = trimmed
+        .strip_prefix("a ")
+        .or_else(|| trimmed.strip_prefix("an "))
+        .or_else(|| trimmed.strip_prefix("the "))
+        .unwrap_or(trimmed);
+    stripped.trim().to_lowercase()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::domain::BoundingBox;
+    use crate::engine::frozen::FrozenDetection;
 
     /// Build a chore for testing.
     fn chore(target: &str, confidence: f32, box_: Option<BoundingBox>) -> ChoreEntity {
@@ -175,5 +228,30 @@ mod tests {
         let mugs = chore("mugs", 0.9, Some(mid_box()));
         let out = postprocess(vec![socks, mugs], "kitchen", 0);
         assert_eq!(out.len(), 2);
+    }
+
+    /// Build a frozen detection for testing.
+    fn detection(label: &str, score: f32) -> FrozenDetection {
+        FrozenDetection { label: label.to_string(), score, r#box: [0, 0, 500, 500] }
+    }
+
+    #[test]
+    fn merge_strips_articles_and_appends() {
+        let out = merge_landmarks(&[], &[detection("a dishwasher", 0.5)], 0.3);
+        assert_eq!(out[0].label, "dishwasher");
+    }
+
+    #[test]
+    fn merge_drops_low_scores() {
+        let out = merge_landmarks(&[], &[detection("a stove", 0.2)], 0.3);
+        assert!(out.is_empty());
+    }
+
+    #[test]
+    fn merge_vlm_wins_on_duplicate_label() {
+        let vlm = vec![Landmark { label: "dishwasher".into(), r#box: None }];
+        let out = merge_landmarks(&vlm, &[detection("a dishwasher", 0.9)], 0.3);
+        assert_eq!(out.len(), 1);
+        assert!(out[0].r#box.is_none(), "VLM landmark must be kept");
     }
 }

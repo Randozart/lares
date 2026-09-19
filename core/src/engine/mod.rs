@@ -5,6 +5,7 @@
 //! deterministic fake ([`mock::MockEngine`]), or a local stub
 //! ([`local::LocalEngine`]) for Phase F.
 
+pub mod frozen;
 pub mod gemini;
 pub mod local;
 pub mod mock;

@@ -4,6 +4,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use lares_core::domain::HudState;
+use lares_core::engine::frozen::FrozenVision;
 use lares_core::engine::VisionInferenceEngine;
 use lares_core::nudge::ReminderPolicy;
 use lares_core::store::Store;
@@ -21,6 +22,8 @@ pub struct AppState {
     pub data_dir: PathBuf,
     /// Live HUD state posted by the phone (in-memory, restarts clear it).
     pub hud_state: Arc<tokio::sync::Mutex<HudState>>,
+    /// Frozen-vision sidecar client; None when LARES_VISION_ENDPOINT unset.
+    pub frozen: Option<Arc<FrozenVision>>,
 }
 
 impl AppState {
