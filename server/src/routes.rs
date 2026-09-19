@@ -449,11 +449,15 @@ async fn remove_expected(
 
 /// Request body for the phone to post ephemeral scan-target state.
 #[derive(Debug, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct HudStateRequest {
     /// The room the phone inferred for the current location.
     pub room_id: String,
     /// Number of scan-targets the client is currently tracking.
     pub target_count: u32,
+    /// Titles of the current ephemeral targets, for VISION tags on HUDs.
+    #[serde(default)]
+    pub targets: Vec<String>,
 }
 
 /// Phone posts live scan-target count after each scan (fire-and-forget).
@@ -464,6 +468,7 @@ async fn hud_post_state(
     let mut hud = state.hud_state.lock().await;
     hud.room_id = req.room_id;
     hud.target_count = req.target_count;
+    hud.targets = req.targets;
     hud.updated_at_unix = now_unix();
     Ok(StatusCode::NO_CONTENT)
 }
@@ -495,14 +500,24 @@ async fn hud_get(State(state): State<AppState>) -> Result<Json<HudResponse>, Api
     tasks.sort_by_key(|t| t.days);
     let next_task = tasks.first().cloned();
     tasks.truncate(3);
+    let tags = lares_core::domain::synthesize_vision_tags(
+        &hud.targets,
+        hud.updated_at_unix,
+        now_unix(),
+        MAX_HUD_TAGS,
+    );
     Ok(Json(HudResponse {
         room: hud.room_id,
         targets: hud.target_count,
         next_task,
         tasks,
         updated_at: hud.updated_at_unix,
+        tags,
     }))
 }
+
+/// Maximum tags a HUD client receives per poll.
+const MAX_HUD_TAGS: usize = 4;
 
 /// Fast ambient tick: frozen models only, no VLM.
 ///

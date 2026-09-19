@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["core", "server", "tracking", "camera"]
+members = ["core", "server", "tracking", "camera", "lares-hud-client"]
 
 [workspace.package]
 version = "0.1.0"
@@ -36,3 +36,9 @@ sqlx = { version = "0.9", default-features = false, features = ["runtime-tokio",
 
 # local crate versions
 lares-core = { path = "core", version = "0.1.0" }
+
+[profile.release]
+opt-level = "z"
+lto = true
+panic = "abort"
+strip = true

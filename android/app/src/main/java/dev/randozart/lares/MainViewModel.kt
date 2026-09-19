@@ -80,6 +80,9 @@ data class PendingCompletion(val choreId: String, val action: String)
 /** Minimum interval between deep VLM audits during a session. */
 private const val AUDIT_INTERVAL_MS = 5 * 60 * 1000L
 
+/** How often to re-probe the frozen sidecar when ticks are unavailable. */
+private const val PROBE_INTERVAL_MS = 60 * 1000L
+
 /**
  * UI state for the fast loop: live tracked boxes, the cost-guard auto-scan
  * state machine, and the chore/landmark overlay derived from the slow loop.
@@ -293,23 +296,31 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
     /**
      * Settle-tick entry point: run the fast frozen loop when the server has
      * the vision sidecar, else fall back to a VLM analyze. Deep audits run
-     * on novelty (the tick response flags it) or every five minutes.
+     * on novelty (the tick response flags it) or every five minutes. When
+     * ticks are unavailable, re-probe the server once a minute — the first
+     * miss is often just an idle Tailscale handshake.
      */
     fun onSettle(controller: CameraController) {
         if (busy || sweeping) return
         if (!autoScan || !shouldAutoScan()) return
-        if (tickAvailable) {
-            captureAndTick(controller)
-        } else {
+        if (!tickAvailable) {
+            if (SystemClock.elapsedRealtime() - lastProbeAt > PROBE_INTERVAL_MS) {
+                probeTick(serverUrl)
+            }
             captureAndAnalyze(controller, bypassGates = false)
+            return
         }
+        captureAndTick(controller)
     }
 
     /** Probe whether the server runs the frozen-vision sidecar. */
     fun probeTick(serverUrl: String) {
+        lastProbeAt = SystemClock.elapsedRealtime()
         viewModelScope.launch {
             withContext(Dispatchers.IO) {
-                tickAvailable = runCatching { client.healthFrozen(serverUrl) }.getOrDefault(false)
+                tickAvailable = runCatching { client.healthFrozen(serverUrl) }
+                    .onFailure { Log.d(TAG, "tick probe failed: $it") }
+                    .getOrDefault(false)
             }
         }
     }
@@ -359,13 +370,17 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
                     }
                     .onFailure {
                         statusLine = "tick failed: ${it.message}"
-                        tickAvailable = false
+                        Log.d(TAG, "tick failed: $it")
+                        // Only a misconfigured server demotes the fast loop;
+                        // transient network timeouts must not.
+                        val hard = it.message?.contains("HTTP 4", ignoreCase = true) == true
+                        if (hard) tickAvailable = false
                     }
             }
             busy = false
             scanning = false
             lastScanAt = SystemClock.elapsedRealtime()
-            postHudState(scanTargets.size)
+            postHudState(scanTargets.size, scanTargets.map { it.target })
             if (postAudit) {
                 postAudit = false
                 captureAndAnalyze(controller, bypassGates = true)
@@ -838,6 +853,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
     /** Internal flags for the tick loop's follow-up audit. */
     private var lastAuditAt = 0L
     private var postAudit = false
+    private var lastProbeAt = 0L
 
     /** Resolve a completion chip: YES marks the chore DONE. */
     fun resolveCompletion(accept: Boolean) {
@@ -884,7 +900,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
             refreshChores()
             loadBriefing()
             checkRoomInference(jpeg, scanLandmarks)
-            postHudState(scanTargets.size)
+            postHudState(scanTargets.size, scanTargets.map { it.target })
         }
     }
 
@@ -901,10 +917,12 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     /** Fire-and-forget: post scan-target count for the HUD firmware. */
-    private fun postHudState(targetCount: Int) {
+    private fun postHudState(targetCount: Int, targets: List<String> = emptyList()) {
         viewModelScope.launch {
             withContext(Dispatchers.IO) {
-                runCatching { client.postHudState(serverUrl, roomId, targetCount) }.onFailure { }
+                runCatching {
+                    client.postHudState(serverUrl, roomId, targetCount, targets)
+                }.onFailure { }
             }
         }
     }
@@ -1032,7 +1050,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
             refreshChores()
             loadBriefing()
             frames.lastOrNull()?.let { checkRoomInference(it, sweepLandmarks) }
-            postHudState(chores.size)
+            postHudState(chores.size, chores.map { it.target })
         }
     }
 

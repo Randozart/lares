@@ -73,8 +73,60 @@ pub struct HudState {
     pub room_id: String,
     /// Number of ephemeral scan-targets currently tracked by the client.
     pub target_count: u32,
+    /// Titles of the current ephemeral targets (max ~4), for VISION tags.
+    pub targets: Vec<String>,
     /// Unix timestamp of the last post (to detect stale data).
     pub updated_at_unix: i64,
+}
+
+/// One tag rendered on head-mounted/external HUD clients.
+///
+/// Tags are the only HUD content: live observations and (later) overheard
+/// requests. Stored registry chores never appear on a HUD.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct HudTag {
+    /// Stable id so clients can animate fades instead of redrawing.
+    pub id: String,
+    /// Source of the tag: "VISION" today; "REQUEST"/"MEETING" later.
+    pub kind: String,
+    /// Short display title.
+    pub title: String,
+    /// Optional detail line (empty for vision tags).
+    pub snippet: String,
+    /// Seconds since the tag was produced.
+    pub age: i64,
+}
+
+/// Synthesize VISION tags from the phone's posted target titles.
+///
+/// Pure helper over the ephemeral HUD state; tags inherit their age from
+/// the last state post so clients can dim stale data. At most `max` tags,
+/// titles truncated for the narrow waveguide.
+pub fn synthesize_vision_tags(
+    targets: &[String],
+    updated_at_unix: i64,
+    now_unix: i64,
+    max: usize,
+) -> Vec<HudTag> {
+    targets
+        .iter()
+        .take(max)
+        .filter(|t| !t.trim().is_empty())
+        .enumerate()
+        .map(|(i, title)| {
+            let mut trimmed = title.trim().to_string();
+            if trimmed.len() > 24 {
+                trimmed.truncate(24);
+            }
+            HudTag {
+                id: format!("vision:{}:{}", i, trimmed.to_lowercase()),
+                kind: "VISION".into(),
+                title: trimmed,
+                snippet: String::new(),
+                age: (now_unix - updated_at_unix).max(0),
+            }
+        })
+        .collect()
 }
 
 /// A storage norm: whether an object class belongs at a place.
@@ -111,6 +163,8 @@ pub struct HudResponse {
     pub tasks: Vec<HudTask>,
     /// Unix timestamp of the last state update.
     pub updated_at: i64,
+    /// Live tags for head-mounted clients (VISION now; REQUEST later).
+    pub tags: Vec<HudTag>,
 }
 
 /// A single task line in the HUD payload.
@@ -148,5 +202,44 @@ pub fn area_display_name(area: RoomArea) -> &'static str {
         RoomArea::Patio => "patio",
         RoomArea::Other => "room",
         _ => "room",
+    }
+}
+#[cfg(test)]
+mod domain_tests {
+    use super::*;
+
+    #[test]
+    fn vision_tags_synthesize_with_stable_ids() {
+        let tags = synthesize_vision_tags(
+            &["socks".into(), "cup".into()],
+            1000,
+            1060,
+            4,
+        );
+        assert_eq!(tags.len(), 2);
+        assert_eq!(tags[0].id, "vision:0:socks");
+        assert_eq!(tags[0].kind, "VISION");
+        assert_eq!(tags[0].age, 60);
+    }
+
+    #[test]
+    fn vision_tags_truncate_and_cap() {
+        let targets = vec![
+            "a very long target title exceeding the waveguide width".into(),
+            "socks".into(),
+            "cup".into(),
+            "book".into(),
+            "plate".into(),
+            "extra".into(),
+        ];
+        let tags = synthesize_vision_tags(&targets, 100, 100, 4);
+        assert_eq!(tags.len(), 4);
+        assert_eq!(tags[0].title.len(), 24);
+    }
+
+    #[test]
+    fn empty_targets_yield_no_tags() {
+        assert!(synthesize_vision_tags(&[], 0, 100, 4).is_empty());
+        assert!(synthesize_vision_tags(&["  ".into()], 0, 100, 4).is_empty());
     }
 }

@@ -52,7 +52,7 @@ import java.util.concurrent.TimeUnit
  */
 class LaresClient {
     private val http = OkHttpClient.Builder()
-        .connectTimeout(10, TimeUnit.SECONDS)
+        .connectTimeout(20, TimeUnit.SECONDS)
         .readTimeout(60, TimeUnit.SECONDS)
         .build()
 
@@ -340,9 +340,11 @@ class LaresClient {
         return builder.build()
     }
 
-    /** Post the live scan-target state for the HUD firmware to poll. */
-    fun postHudState(baseUrl: String, roomId: String, targetCount: Int) {
-        val body = """{"roomId":"${roomId.replace("\"", "\\\"")}","targetCount":$targetCount}"""
+    /** Post the live scan-target state for HUD clients to poll. */
+    fun postHudState(baseUrl: String, roomId: String, targetCount: Int, targets: List<String> = emptyList()) {
+        val titles = targets.joinToString(",") { """"${it.replace("\"", "\\\"")}"""" }
+        val body =
+            """{"roomId":"${roomId.replace("\"", "\\\"")}","targetCount":$targetCount,"targets":[$titles]}"""
         send("$baseUrl/v1/hud", body)
     }
 
