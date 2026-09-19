@@ -2,13 +2,14 @@
 
 pub use crate::lares::v1::{
     AnalyzeMode, AnalyzeSceneRequest, AnalyzeSceneResponse, AnalyzeSource, Briefing, BriefingItem,
-    BriefingItemKind, BoundingBox, ChoreEntity, ChoreKind, ChoreStatus, FingerprintKind,
-    FingerprintRecord, IdleContext, ImportCalendarRequest, ImportCalendarResponse, Landmark,
-    LandmarkList, LeadFlag, ListChoresResponse, ListFingerprintsResponse, Nudge, NudgeRequest,
-    NudgeResponse, Occasion, OccasionKind, OccasionList, Person, PersonList, Preparation,
-    PreparationKind, PreparationList, PreparationState, Recurrence, RecurrenceFreq,
-    ReferenceState, Reminder, ReminderList, RoomArea, SetChoreStatusRequest,
-    SetFingerprintRequest, SetReferenceRequest, InferRoomRequest, InferRoomResponse,
+    BriefingItemKind, BoundingBox, ChoreEntity, ChoreKind, ChoreStatus, CompletionCandidate,
+    FingerprintKind, FingerprintRecord, IdleContext, ImportCalendarRequest, ImportCalendarResponse,
+    InferRoomRequest, InferRoomResponse, Landmark, LandmarkList, LeadFlag, ListChoresResponse,
+    ListFingerprintsResponse, Nudge, NudgeRequest, NudgeResponse, Occasion, OccasionKind,
+    OccasionList, Person, PersonList, Preparation, PreparationKind, PreparationList,
+    PreparationState, Recurrence, RecurrenceFreq, ReferenceState, Reminder, ReminderList,
+    RoomArea, SetChoreStatusRequest, SetFingerprintRequest, SetReferenceRequest, TickRequest,
+    TickResponse,
 };
 
 /// Lower bound of normalized box coordinates.
@@ -74,6 +75,27 @@ pub struct HudState {
     pub target_count: u32,
     /// Unix timestamp of the last post (to detect stale data).
     pub updated_at_unix: i64,
+}
+
+/// A storage norm: whether an object class belongs at a place.
+///
+/// Learned from seeds, user corrections, and cached LLM verdicts; the
+/// frozen-loop judge consults it instead of running a language model
+/// every tick.
+#[derive(Debug, Clone)]
+pub struct Norm {
+    /// Object class, lowercased bare noun ("cup", "dirty dishes").
+    pub object_class: String,
+    /// Place the object was observed at ("floor", "sink", "sofa").
+    pub place: String,
+    /// "GOOD" (belongs there) or "BAD" (misplaced — task candidate).
+    pub verdict: String,
+    /// Directive template for BAD verdicts, e.g. "Put the cup in the sink".
+    pub action_hint: String,
+    /// Provenance: "seed", "user", or "llm".
+    pub source: String,
+    /// Unix timestamp of the last write.
+    pub updated_at: i64,
 }
 
 /// The lightweight JSON payload the HUD firmware polls every few seconds.

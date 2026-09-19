@@ -8,9 +8,10 @@ use std::path::Path;
 
 use sqlx::sqlite::{SqliteConnectOptions, SqlitePoolOptions};
 use sqlx::{Row, SqlitePool};
+use std::str::FromStr;
 use crate::domain::{
     now_unix, BoundingBox, ChoreEntity, ChoreStatus, FingerprintKind, FingerprintRecord, Landmark,
-    Occasion, Person, Preparation, Recurrence, ReferenceState, Reminder,
+    Norm, Occasion, Person, Preparation, Recurrence, ReferenceState, Reminder,
 };
 
 /// Errors produced by the persistence layer.
@@ -127,6 +128,17 @@ const DDL_REMINDERS: &str = "CREATE TABLE IF NOT EXISTS reminders (
     delivered INTEGER NOT NULL DEFAULT 0
 )";
 
+/// DDL for the storage-norm table.
+const DDL_NORMS: &str = "CREATE TABLE IF NOT EXISTS norms (
+    object_class TEXT NOT NULL,
+    place TEXT NOT NULL,
+    verdict TEXT NOT NULL,
+    action_hint TEXT NOT NULL DEFAULT '',
+    source TEXT NOT NULL DEFAULT 'seed',
+    updated_at INTEGER NOT NULL,
+    PRIMARY KEY (object_class, place)
+)";
+
 impl Store {
     /// Open (creating if needed) the database under `data_dir`.
     pub async fn connect(data_dir: impl AsRef<Path>) -> Result<Self, StoreError> {
@@ -138,6 +150,21 @@ impl Store {
             .create_if_missing(true);
         let pool = SqlitePoolOptions::new()
             .max_connections(5)
+            .connect_with(options)
+            .await?;
+        let store = Self { pool };
+        store.migrate().await?;
+        Ok(store)
+    }
+
+    /// Open an in-memory store (single connection, schema migrated).
+    ///
+    /// Used by tests and ephemeral tooling; data dies with the pool.
+    pub async fn connect_in_memory() -> Result<Self, StoreError> {
+        let options = SqliteConnectOptions::from_str("sqlite::memory:")?
+            .create_if_missing(true);
+        let pool = SqlitePoolOptions::new()
+            .max_connections(1)
             .connect_with(options)
             .await?;
         let store = Self { pool };
@@ -157,6 +184,7 @@ impl Store {
         self.create_table(DDL_CALENDAR_SOURCES).await?;
         self.create_table(DDL_PREPARATIONS).await?;
         self.create_table(DDL_REMINDERS).await?;
+        self.create_table(DDL_NORMS).await?;
         self.ensure_how_to_column().await?;
         self.ensure_chores_phase_h_columns().await?;
         Ok(())
@@ -687,6 +715,54 @@ impl Store {
     /// Store a reminder unless an undelivered one already exists for the task.
     ///
     /// Returns whether a new row was inserted.
+    /// Load every storage norm.
+    ///
+    /// The table is small (hundreds of rows); the frozen-loop judge loads
+    /// it wholesale each tick rather than issuing per-combo queries.
+    pub async fn list_norms(&self) -> Result<Vec<Norm>, StoreError> {
+        let rows = sqlx::query(
+            "SELECT object_class, place, verdict, action_hint, source, updated_at
+             FROM norms",
+        )
+        .fetch_all(&self.pool)
+        .await?;
+        let mut norms = Vec::with_capacity(rows.len());
+        for row in rows {
+            norms.push(Norm {
+                object_class: row.try_get("object_class")?,
+                place: row.try_get("place")?,
+                verdict: row.try_get("verdict")?,
+                action_hint: row.try_get("action_hint")?,
+                source: row.try_get("source")?,
+                updated_at: row.try_get("updated_at")?,
+            });
+        }
+        Ok(norms)
+    }
+
+    /// Insert or refresh one storage norm.
+    pub async fn upsert_norm(&self, norm: &Norm) -> Result<(), StoreError> {
+        sqlx::query(
+            "INSERT INTO norms
+                (object_class, place, verdict, action_hint, source, updated_at)
+             VALUES (?, ?, ?, ?, ?, ?)
+             ON CONFLICT(object_class, place) DO UPDATE SET
+                verdict = excluded.verdict,
+                action_hint = excluded.action_hint,
+                source = excluded.source,
+                updated_at = excluded.updated_at",
+        )
+        .bind(&norm.object_class)
+        .bind(&norm.place)
+        .bind(&norm.verdict)
+        .bind(&norm.action_hint)
+        .bind(&norm.source)
+        .bind(norm.updated_at)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
     pub async fn add_reminder(&self, reminder: &Reminder) -> Result<bool, StoreError> {
         let existing = sqlx::query(
             "SELECT COUNT(*) AS n FROM reminders WHERE task_id = ? AND delivered = 0",

@@ -10,11 +10,12 @@ use axum::{
 
 use lares_core::diff;
 use lares_core::domain::{
-    now_unix, AnalyzeMode, AnalyzeSceneRequest, AnalyzeSceneResponse, ChoreEntity, ChoreKind,
-    ChoreStatus, FingerprintKind, HudResponse, HudTask, InferRoomRequest, InferRoomResponse,
-    LandmarkList, ListChoresResponse, ListFingerprintsResponse, NudgeRequest, NudgeResponse,
-    RecurrenceFreq, ReferenceState, Reminder, SetChoreStatusRequest, SetFingerprintRequest,
-    SetReferenceRequest,
+    now_unix, AnalyzeMode, AnalyzeSceneRequest, AnalyzeSceneResponse, BoundingBox, ChoreEntity,
+    ChoreKind, ChoreStatus, CompletionCandidate, FingerprintKind, HudResponse, HudTask,
+    InferRoomRequest, InferRoomResponse, LandmarkList, ListChoresResponse,
+    ListFingerprintsResponse, NudgeRequest, NudgeResponse, RecurrenceFreq, ReferenceState,
+    Reminder, SetChoreStatusRequest, SetFingerprintRequest, SetReferenceRequest, TickRequest,
+    TickResponse,
 };
 use lares_core::engine::RoomCandidate;
 use lares_core::engine::InferenceError;
@@ -36,6 +37,7 @@ pub fn router(state: AppState) -> Router {
         .route("/v1/chores/{id}/status", patch(set_status))
         .route("/v1/nudge", post(nudge))
         .route("/v1/hud", get(hud_get).post(hud_post_state))
+        .route("/v1/tick", post(tick))
         .route(
             "/v1/rooms/{room_id}/landmarks",
             get(get_landmarks),
@@ -79,7 +81,8 @@ async fn health(State(state): State<AppState>) -> Json<serde_json::Value> {
     Json(serde_json::json!({
         "status": "ok",
         "engine": state.engine.name(),
-        "policy": "noop"
+        "policy": "noop",
+        "frozen": state.frozen.is_some()
     }))
 }
 
@@ -500,6 +503,150 @@ async fn hud_get(State(state): State<AppState>) -> Result<Json<HudResponse>, Api
         updated_at: hud.updated_at_unix,
     }))
 }
+
+/// Fast ambient tick: frozen models only, no VLM.
+///
+/// Detects messable objects and surfaces, scores relations between them,
+/// judges each against the learned norm table, and checks open chores'
+/// expected relations for completion. Candidates ride ChoreEntity shape so
+/// the client's ephemeral HUD pipeline renders them unchanged. Requires
+/// LARES_VISION_ENDPOINT; the client falls back to VLM scans otherwise.
+async fn tick(
+    State(state): State<AppState>,
+    Json(req): Json<TickRequest>,
+) -> Result<Json<TickResponse>, ApiError> {
+    let Some(frozen) = state.frozen.as_ref() else {
+        return Err(ApiError::bad_request("frozen vision not configured"));
+    };
+    if req.frame_jpeg.is_empty() {
+        return Err(ApiError::bad_request("frameJpeg is required"));
+    }
+    let detections = frozen
+        .detect_queries(&req.frame_jpeg, lares_core::engine::frozen::TICK_QUERIES, 0.3)
+        .await
+        .map_err(ApiError::internal)?;
+    let (labels, boxes) = lares_core::engine::frozen::tick_inputs(&detections);
+    let relations = if labels.len() >= 2 {
+        frozen
+            .relate(
+                &req.frame_jpeg,
+                &labels,
+                &boxes,
+                lares_core::engine::frozen::RELATION_VOCABULARY,
+            )
+            .await
+            .map_err(ApiError::internal)?
+            .into_iter()
+            .map(|t| lares_core::norms::Relation {
+                subject: t.subject,
+                predicate: t.predicate,
+                object: t.object,
+                score: t.score,
+            })
+            .collect::<Vec<_>>()
+    } else {
+        Vec::new()
+    };
+
+    let norm_rows = state.store.list_norms().await?;
+    let unknowns = lares_core::norms::unknown_combos(&norm_rows, &relations);
+    let mut judged = lares_core::norms::judge(&norm_rows, &relations);
+    judged.sort_by(|a, b| b.relation.score.total_cmp(&a.relation.score));
+    judged.truncate(MAX_TICK_CANDIDATES);
+
+    // Teach the norm table asynchronously for unseen suspicious combos;
+    // capped per tick so a novel room cannot stampede the LLM.
+    if let Ok(endpoint) = std::env::var("LARES_LOCAL_ENDPOINT") {
+        let model = std::env::var("LARES_MODEL").unwrap_or_else(|_| "qwen2.5-vl".into());
+        for combo in unknowns.into_iter().take(2) {
+            let store = state.store.clone();
+            let http = reqwest::Client::new();
+            let endpoint = endpoint.clone();
+            let model = model.clone();
+            tokio::spawn(async move {
+                if let Some((verdict, action)) = lares_core::norms::judge_norm_via_llm(
+                    &http, &endpoint, &model, &combo.subject, &combo.object,
+                )
+                .await
+                {
+                    let norm = lares_core::domain::Norm {
+                        object_class: combo.subject,
+                        place: combo.object,
+                        verdict,
+                        action_hint: action,
+                        source: "llm".into(),
+                        updated_at: now_unix(),
+                    };
+                    let _ = store.upsert_norm(&norm).await;
+                }
+            });
+        }
+    }
+
+    let mut candidates = Vec::with_capacity(judged.len());
+    for entry in &judged {
+        let subject = entry.relation.subject.clone();
+        let subject_box = labels
+            .iter()
+            .position(|l| *l == subject)
+            .map(|i| boxes[i]);
+        let action = if entry.norm.action_hint.is_empty() {
+            format!("Put the {subject} away")
+        } else {
+            entry.norm.action_hint.clone()
+        };
+        candidates.push(ChoreEntity {
+            id: format!("tick:{}", uuid::Uuid::new_v4()),
+            room_id: req.room_id.clone(),
+            target: subject,
+            action,
+            kind: ChoreKind::Task as i32,
+            status: ChoreStatus::Discovered as i32,
+            confidence: entry.relation.score,
+            r#box: subject_box.map(|b| BoundingBox {
+                ymin: b[0],
+                xmin: b[1],
+                ymax: b[2],
+                xmax: b[3],
+            }),
+            estimated_seconds: 20,
+            ..Default::default()
+        });
+    }
+
+    let chores = state.store.list_chores(None).await?;
+    let completions = lares_core::norms::find_completions(&chores, &relations)
+        .into_iter()
+        .map(|m| CompletionCandidate { chore_id: m.chore_id, action: m.action })
+        .collect();
+
+    // Novelty audit: a confident detection whose bare label was never
+    // stored in this room's landmark profile.
+    let stored = state.store.get_landmarks(&req.room_id).await?;
+    let known: std::collections::HashSet<String> =
+        stored.iter().map(|l| l.label.to_lowercase()).collect();
+    let audit_recommended = detections.iter().any(|d| {
+        let label = lares_core::engine::frozen::bare_label(&d.label);
+        d.score >= 0.5 && label != "floor" && !known.contains(&label)
+    });
+
+    let scene_class = frozen
+        .classify_room(&req.frame_jpeg, SCENE_CLASSES)
+        .await
+        .map(|r| r.room)
+        .unwrap_or_default();
+
+    Ok(Json(TickResponse {
+        room_id: req.room_id,
+        scene_class,
+        candidates,
+        completions,
+        audit_recommended,
+    }))
+}
+
+/// Maximum misplaced-object candidates a single tick may surface.
+const MAX_TICK_CANDIDATES: usize = 4;
 
 /// Load the stored reference image for a room, if any.
 async fn load_reference(state: &AppState, room_id: &str) -> Result<Option<Vec<u8>>, ApiError> {

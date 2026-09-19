@@ -26,6 +26,7 @@ pub mod domain;
 pub mod engine;
 pub mod ics;
 pub mod nudge;
+pub mod norms;
 pub mod prompt;
 pub mod reminders;
 pub mod rooms;

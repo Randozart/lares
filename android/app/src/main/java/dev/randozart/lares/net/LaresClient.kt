@@ -34,6 +34,8 @@ import dev.randozart.lares.proto.RoomArea
 import dev.randozart.lares.proto.SetChoreStatusRequest
 import dev.randozart.lares.proto.SetFingerprintRequest
 import dev.randozart.lares.proto.SetReferenceRequest
+import dev.randozart.lares.proto.TickRequest
+import dev.randozart.lares.proto.TickResponse
 import com.google.gson.JsonParser
 import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.OkHttpClient
@@ -342,6 +344,30 @@ class LaresClient {
     fun postHudState(baseUrl: String, roomId: String, targetCount: Int) {
         val body = """{"roomId":"${roomId.replace("\"", "\\\"")}","targetCount":$targetCount}"""
         send("$baseUrl/v1/hud", body)
+    }
+
+    /** Whether the server has the frozen-vision sidecar configured. */
+    fun healthFrozen(baseUrl: String): Boolean {
+        val root = JsonParser.parseString(get("$baseUrl/v1/health")).asJsonObject
+        return root.get("frozen")?.asBoolean ?: false
+    }
+
+    /** Fast ambient tick: frozen models only, no VLM round trip. */
+    fun tick(
+        baseUrl: String,
+        roomId: String,
+        jpeg: ByteArray,
+        roomArea: RoomArea = RoomArea.ROOM_AREA_UNSPECIFIED,
+    ): TickResponse {
+        val request = TickRequest.newBuilder()
+            .setRoomId(roomId)
+            .setFrameJpeg(ByteString.copyFrom(jpeg))
+            .setRoomArea(roomArea)
+            .build()
+        val body = post("$baseUrl/v1/tick", printer.print(request))
+        val builder = TickResponse.newBuilder()
+        parser.merge(body, builder)
+        return builder.build()
     }
 
     /** Mark a reminder delivered. */

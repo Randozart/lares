@@ -207,11 +207,13 @@ fun LaresApp(controller: CameraController) {
         controller.probeTorch()
     }
 
+    LaunchedEffect(viewModel.serverUrl) {
+        viewModel.probeTick(viewModel.serverUrl)
+    }
+
     val settleDetector = remember {
         SettleDetector(context) {
-            if (viewModel.autoScan && viewModel.shouldAutoScan()) {
-                viewModel.captureAndAnalyze(controller, bypassGates = false)
-            }
+            viewModel.onSettle(controller)
         }
     }
     DisposableEffect(viewModel.autoScan) {
@@ -511,6 +513,22 @@ private fun HudChrome(
                     )
                     HudButton("FILE", palette, { viewModel.fileSuggestion() }, filled = true)
                     HudButton("NO", palette, { viewModel.dismissSuggestion() })
+                }
+            }
+            viewModel.pendingCompletion?.let { candidate ->
+                Row(
+                    horizontalArrangement = Arrangement.spacedBy(6.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    Text(
+                        hud("${candidate.action.uppercase()} — RESOLVED?"),
+                        fontFamily = HudFont,
+                        fontSize = 11.sp,
+                        color = palette.primary,
+                        modifier = Modifier.weight(1f, fill = false),
+                    )
+                    HudButton("YES", palette, { viewModel.resolveCompletion(true) }, filled = true)
+                    HudButton("NO", palette, { viewModel.resolveCompletion(false) })
                 }
             }
             if (showMissionLog) {

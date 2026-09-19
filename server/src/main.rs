@@ -34,6 +34,10 @@ async fn main() {
             std::process::exit(1);
         }
     };
+    // Household defaults on first boot; no-op once the table has rows.
+    if let Err(err) = lares_core::norms::seed_defaults(&store).await {
+        eprintln!("failed to seed norms: {err}");
+    }
 
     let app_state = AppState {
         engine: Arc::from(engine),

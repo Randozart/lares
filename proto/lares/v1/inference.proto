@@ -60,6 +60,33 @@ message InferRoomResponse {
   repeated string evidence = 3;
 }
 
+// A frozen-loop observation that satisfies an open chore's directive.
+message CompletionCandidate {
+  string chore_id = 1;
+  // The chore's action text, for the chip label.
+  string action = 2;
+}
+
+// A fast ambient tick: frozen models only, no VLM.
+message TickRequest {
+  string room_id = 1;
+  bytes frame_jpeg = 2;
+  RoomArea room_area = 3;
+}
+
+message TickResponse {
+  string room_id = 1;
+  // Zero-shot room class from CLIP, when the sidecar is configured.
+  string scene_class = 2;
+  // Misplaced-object candidates in ChoreEntity shape, ephemeral.
+  repeated ChoreEntity candidates = 3;
+  // Open chores whose expected relation was observed — completion chips.
+  repeated CompletionCandidate completions = 4;
+  // True when the tick saw an object class unseen in this room; the client
+  // should schedule a deep VLM audit.
+  bool audit_recommended = 5;
+}
+
 // The result of analyzing a frame.
 message AnalyzeSceneResponse {
   repeated ChoreEntity chores = 1;

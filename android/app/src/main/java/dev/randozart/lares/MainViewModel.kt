@@ -74,6 +74,12 @@ private const val ROOM_COOLDOWN_MS = 5 * 60 * 1000L
 /** A pending room suggestion: the candidate and the landmarks that matched. */
 data class PendingRoom(val roomId: String, val evidence: List<String>)
 
+/** An observed completion awaiting the user's confirmation. */
+data class PendingCompletion(val choreId: String, val action: String)
+
+/** Minimum interval between deep VLM audits during a session. */
+private const val AUDIT_INTERVAL_MS = 5 * 60 * 1000L
+
 /**
  * UI state for the fast loop: live tracked boxes, the cost-guard auto-scan
  * state machine, and the chore/landmark overlay derived from the slow loop.
@@ -118,6 +124,14 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
 
     /** Common-task-space suggestion awaiting user action, if any. */
     var pendingSuggestion by mutableStateOf<String?>(null)
+        private set
+
+    /** Whether the server runs the frozen-vision sidecar (fast ticks). */
+    var tickAvailable by mutableStateOf(false)
+        private set
+
+    /** Completion candidate from the frozen loop awaiting confirmation. */
+    var pendingCompletion by mutableStateOf<PendingCompletion?>(null)
         private set
 
     private var inferBusy = false
@@ -271,7 +285,91 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
                 statusLine = "capture failed"
                 return@captureJpeg
             }
+            lastAuditAt = SystemClock.elapsedRealtime()
             analyze(jpeg, anchor)
+        }
+    }
+
+    /**
+     * Settle-tick entry point: run the fast frozen loop when the server has
+     * the vision sidecar, else fall back to a VLM analyze. Deep audits run
+     * on novelty (the tick response flags it) or every five minutes.
+     */
+    fun onSettle(controller: CameraController) {
+        if (busy || sweeping) return
+        if (!autoScan || !shouldAutoScan()) return
+        if (tickAvailable) {
+            captureAndTick(controller)
+        } else {
+            captureAndAnalyze(controller, bypassGates = false)
+        }
+    }
+
+    /** Probe whether the server runs the frozen-vision sidecar. */
+    fun probeTick(serverUrl: String) {
+        viewModelScope.launch {
+            withContext(Dispatchers.IO) {
+                tickAvailable = runCatching { client.healthFrozen(serverUrl) }.getOrDefault(false)
+            }
+        }
+    }
+
+    /** Fast frozen tick: detect → relate → judge, no VLM. */
+    fun captureAndTick(controller: CameraController) {
+        if (busy) return
+        val anchor = engine.lastFrame
+        controller.captureJpeg { jpeg ->
+            if (jpeg == null) {
+                statusLine = "capture failed"
+                return@captureJpeg
+            }
+            tick(jpeg, anchor, controller)
+        }
+    }
+
+    /** Send a tick frame to the frozen loop and adopt its candidates. */
+    private fun tick(jpeg: ByteArray, anchor: GrayFrame?, controller: CameraController) {
+        viewModelScope.launch {
+            busy = true
+            statusLine = "ticking..."
+            withContext(Dispatchers.IO) {
+                val upload = downscaleJpeg(jpeg, 1280)
+                lastFrameBitmap = BitmapFactory.decodeByteArray(upload, 0, upload.size)
+                runCatching { client.tick(serverUrl, roomId, upload, roomArea) }
+                    .onSuccess { response ->
+                        val items = response.candidatesList
+                        scanTargets = items
+                        rebuildChoreIndex(chores, items)
+                        buildThumbnails(lastFrameBitmap, items)
+                        if (anchor != null && items.isNotEmpty()) {
+                            engine.anchor(anchor, choreBoxes(items))
+                            lastFingerprint = engine.fingerprint(anchor)
+                        }
+                        pendingCompletion = response.completionsList.firstOrNull()?.let {
+                            PendingCompletion(it.choreId, it.action)
+                        }
+                        val status = if (items.isEmpty()) "tick: clear" else "${items.size} targets (tick)"
+                        statusLine = status
+                        // Novelty or staleness triggers a deep VLM audit.
+                        val stale = SystemClock.elapsedRealtime() - lastAuditAt > AUDIT_INTERVAL_MS
+                        if (response.auditRecommended || stale) {
+                            lastAuditAt = SystemClock.elapsedRealtime()
+                            postAudit = true
+                        }
+                    }
+                    .onFailure {
+                        statusLine = "tick failed: ${it.message}"
+                        tickAvailable = false
+                    }
+            }
+            busy = false
+            scanning = false
+            lastScanAt = SystemClock.elapsedRealtime()
+            postHudState(scanTargets.size)
+            if (postAudit) {
+                postAudit = false
+                captureAndAnalyze(controller, bypassGates = true)
+            }
         }
     }
 
@@ -735,6 +833,18 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
     /** Dismiss the current task suggestion. */
     fun dismissSuggestion() {
         pendingSuggestion = null
+    }
+
+    /** Internal flags for the tick loop's follow-up audit. */
+    private var lastAuditAt = 0L
+    private var postAudit = false
+
+    /** Resolve a completion chip: YES marks the chore DONE. */
+    fun resolveCompletion(accept: Boolean) {
+        val candidate = pendingCompletion ?: return
+        pendingCompletion = null
+        if (!accept) return
+        setStatus(candidate.choreId, ChoreStatus.CHORE_STATUS_DONE)
     }
 
     /** Send the captured frame to the slow loop and store the response. */
