@@ -1,0 +1,4 @@
+# Android 5.1's linker can't read GNU-hash-only symbol tables (lld default);
+# emit the legacy hash as well so API 22 can resolve symbols.
+[target.armv7-linux-androideabi]
+rustflags = ["-C", "link-arg=-Wl,--hash-style=both"]

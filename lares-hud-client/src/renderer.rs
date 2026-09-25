@@ -9,20 +9,23 @@
 use crate::ffi as gl;
 use crate::model::{Level, Prim};
 
-/// Vertices per primitive kind laid out as (x, y, r, g, b) triplets.
+/// Vertices per primitive kind laid out as (x, y, r, g, b) 5-tuples.
+///
+/// Dots, lines and triangles live in three CONTIGUOUS sections so each
+/// glDrawArrays call draws exactly its own kind — interleaving them made
+/// the per-mode counts draw slices of the wrong primitives.
 pub struct Batch {
-    pub data: Vec<f32>,
-    points: usize,
-    lines: usize,
-    tris: usize,
+    dots: Vec<f32>,
+    lines: Vec<f32>,
+    tris: Vec<f32>,
 }
 
 /// Luminance ratios per level — the mono waveguide collapses these anyway.
 fn level_rgb(level: Level) -> (f32, f32, f32) {
     match level {
-        Level::Full => (0.0, 1.0, 0.45),
-        Level::Mid => (0.0, 0.55, 0.25),
-        Level::Dim => (0.0, 0.25, 0.12),
+        Level::Full => (0.0, 1.0, 0.55),
+        Level::Mid => (0.0, 0.65, 0.35),
+        Level::Dim => (0.0, 0.4, 0.2),
     }
 }
 
@@ -30,10 +33,9 @@ impl Batch {
     /// Expand a frame's primitives into draw batches for a given size.
     pub fn build(prims: &[Prim], w: i32, h: i32) -> Self {
         let mut batch = Batch {
-            data: Vec::with_capacity(prims.len() * 64),
-            points: 0,
-            lines: 0,
-            tris: 0,
+            dots: Vec::with_capacity(prims.len() * 64),
+            lines: Vec::new(),
+            tris: Vec::new(),
         };
         for prim in prims {
             batch.push_prim(prim, w, h);
@@ -42,22 +44,19 @@ impl Batch {
     }
 
     fn dot(&mut self, x: f32, y: f32, rgb: (f32, f32, f32)) {
-        self.data.extend_from_slice(&[x, y, rgb.0, rgb.1, rgb.2]);
-        self.points += 1;
+        self.dots.extend_from_slice(&[x, y, rgb.0, rgb.1, rgb.2]);
     }
 
     fn tri(&mut self, pts: [(f32, f32); 3], rgb: (f32, f32, f32)) {
         for (x, y) in pts {
-            self.data.extend_from_slice(&[x, y, rgb.0, rgb.1, rgb.2]);
+            self.tris.extend_from_slice(&[x, y, rgb.0, rgb.1, rgb.2]);
         }
-        self.tris += 3;
     }
 
     fn line(&mut self, a: (f32, f32), b: (f32, f32), rgb: (f32, f32, f32)) {
         for (x, y) in [a, b] {
-            self.data.extend_from_slice(&[x, y, rgb.0, rgb.1, rgb.2]);
+            self.lines.extend_from_slice(&[x, y, rgb.0, rgb.1, rgb.2]);
         }
-        self.lines += 2;
     }
 
     fn push_prim(&mut self, prim: &Prim, w: i32, h: i32) {
@@ -159,14 +158,23 @@ impl Renderer {
 
     /// Draw one frame's batches.
     pub fn draw(&self, batch: &Batch) {
+        let dot_vertices = batch.dots.len() / 5;
+        let line_vertices = batch.lines.len() / 5;
+
+        // Contiguous upload: [dots | lines | tris].
+        let mut data = Vec::with_capacity(batch.dots.len() + batch.lines.len() + batch.tris.len());
+        data.extend_from_slice(&batch.dots);
+        data.extend_from_slice(&batch.lines);
+        data.extend_from_slice(&batch.tris);
+
         unsafe {
             gl::glClear(0x4000); // GL_COLOR_BUFFER_BIT
             gl::glUseProgram(self.program);
             gl::glBindBuffer(gl::GL_ARRAY_BUFFER, self.buffer);
             gl::glBufferData(
                 gl::GL_ARRAY_BUFFER,
-                (batch.data.len() * std::mem::size_of::<f32>()) as isize,
-                batch.data.as_ptr(),
+                (data.len() * std::mem::size_of::<f32>()) as isize,
+                data.as_ptr(),
                 gl::GL_DYNAMIC_DRAW,
             );
             gl::glEnableVertexAttribArray(self.attrib_pos as u32);
@@ -188,16 +196,23 @@ impl Renderer {
                 (2 * std::mem::size_of::<f32>()) as *const (),
             );
 
-            let points_end = batch.points;
-            let lines_end = points_end + batch.lines;
-            if points_end > 0 {
-                gl::glDrawArrays(gl::GL_POINTS, 0, points_end as i32);
+            if dot_vertices > 0 {
+                gl::glDrawArrays(gl::GL_POINTS, 0, dot_vertices as i32);
             }
-            if lines_end > points_end {
-                gl::glDrawArrays(gl::GL_LINES, points_end as i32, batch.lines as i32);
+            if line_vertices > 0 {
+                gl::glDrawArrays(
+                    gl::GL_LINES,
+                    dot_vertices as i32,
+                    line_vertices as i32,
+                );
             }
-            if batch.tris > 0 {
-                gl::glDrawArrays(gl::GL_TRIANGLES, lines_end as i32, batch.tris as i32);
+            let tri_vertices = batch.tris.len() / 5;
+            if tri_vertices > 0 {
+                gl::glDrawArrays(
+                    gl::GL_TRIANGLES,
+                    (dot_vertices + line_vertices) as i32,
+                    tri_vertices as i32,
+                );
             }
         }
     }

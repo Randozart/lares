@@ -21,6 +21,8 @@ pub const EGL_DEPTH_SIZE: EGLint = 0x3025;
 pub const EGL_RENDERABLE_TYPE: EGLint = 0x3040;
 pub const EGL_OPENGL_ES2_BIT: EGLint = 0x0004;
 pub const EGL_NONE: EGLint = 0x3038;
+pub const EGL_WIDTH: EGLint = 0x3057;
+pub const EGL_HEIGHT: EGLint = 0x3056;
 pub const EGL_DISPLAY_SCALING: EGLint = 10000;
 pub const EGL_NO_DISPLAY: EGLDisplay = std::ptr::null();
 pub const EGL_NO_SURFACE: EGLSurface = std::ptr::null();
@@ -72,6 +74,12 @@ extern "C" {
         context: EGLContext,
     ) -> u32;
     pub fn eglSwapBuffers(display: EGLDisplay, surface: EGLSurface) -> u32;
+    pub fn eglQuerySurface(
+        display: EGLDisplay,
+        surface: EGLSurface,
+        attribute: EGLint,
+        value: *mut EGLint,
+    ) -> u32;
     pub fn eglSwapInterval(display: EGLDisplay, interval: EGLint) -> u32;
     pub fn eglTerminate(display: EGLDisplay) -> u32;
 }
@@ -114,4 +122,19 @@ extern "C" {
         stride: i32,
         pointer: *const (),
     );
+}
+
+#[link(name = "log")]
+extern "C" {
+    fn __android_log_print(prio: i32, tag: *const u8, text: *const u8, ...);
+}
+
+/// Log to logcat under the HudRust tag (priority 3 = INFO, 4 = WARN).
+pub fn alog(level: i32, msg: &str) {
+    let mut tag = b"HudRust\0".to_vec();
+    let mut text = msg.as_bytes().to_vec();
+    text.push(0);
+    unsafe {
+        __android_log_print(level, tag.as_ptr(), text.as_ptr());
+    }
 }

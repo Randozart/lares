@@ -6,7 +6,7 @@
 set -euo pipefail
 
 SDK="${ANDROID_HOME:-$HOME/Android/Sdk}"
-export JAVA_HOME="${JAVA_HOME:-$HOME/brief-tools/jdk-17.0.20+8}"
+export JAVA_HOME="${JAVA_HOME:-$HOME/tools/jdk17}"
 export PATH="$JAVA_HOME/bin:$PATH"
 BT="$(ls -d "$SDK"/build-tools/* | sort -V | tail -1)"
 PLATFORM="$SDK/platforms/android-35/android.jar"

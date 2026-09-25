@@ -41,17 +41,13 @@ fn consume_input(app: &AndroidApp) {
     if let Ok(mut iter) = app.input_events_iter() {
         while iter.next(|event| match event {
             InputEvent::KeyEvent(key) => {
+                if key.action() == KeyAction::Down && key.key_code() == Keycode::Back {
+                    // Back is the exit path: leave it to the system.
+                    return InputStatus::Unhandled;
+                }
                 if key.action() == KeyAction::Down {
-                    if matches!(
-                        key.key_code(),
-                        Keycode::DpadRight
-                            | Keycode::DpadLeft
-                            | Keycode::DpadCenter
-                            | Keycode::Back
-                    ) {
-                        let now = !BLANKED.load(Ordering::Relaxed);
-                        BLANKED.store(now, Ordering::Relaxed);
-                    }
+                    let now = !BLANKED.load(Ordering::Relaxed);
+                    BLANKED.store(now, Ordering::Relaxed);
                 }
                 InputStatus::Handled
             }
@@ -65,16 +61,21 @@ fn init_egl(
     app: &AndroidApp,
 ) -> Result<(ffi::EGLDisplay, ffi::EGLSurface, renderer::Renderer), ()> {
     let window = app.native_window().ok_or(())?;
-    let native = window.ptr().as_ptr() as *const ();
+    let _ = window; // size comes from the EGL surface, not the window hint
+    let native = app.native_window().map(|w| w.ptr().as_ptr() as *const ()).ok_or(())?;
     unsafe {
+        ffi::alog(3, "egl: get display");
         let display = ffi::eglGetDisplay(std::ptr::null());
         if display == ffi::EGL_NO_DISPLAY {
+            ffi::alog(4, "egl: no display");
             return Err(());
         }
         let (mut major, mut minor) = (0, 0);
         if ffi::eglInitialize(display, &mut major, &mut minor) == 0 {
+            ffi::alog(4, "egl: initialize failed");
             return Err(());
         }
+        ffi::alog(3, "egl: initialized");
         const CONFIG_ATTRIBS: [ffi::EGLint; 13] = [
             ffi::EGL_SURFACE_TYPE,
             ffi::EGL_WINDOW_BIT,
@@ -95,25 +96,42 @@ fn init_egl(
         if ffi::eglChooseConfig(display, CONFIG_ATTRIBS.as_ptr(), &mut config, 1, &mut count) == 0
             || count < 1
         {
+            ffi::alog(4, "egl: no config");
             return Err(());
         }
+        ffi::alog(3, "egl: config ok");
         // EGL_CONTEXT_CLIENT_VERSION = 2 (GLES2).
         const CONTEXT_ATTRIBS: [ffi::EGLint; 3] = [0x3098, 2, ffi::EGL_NONE];
         let context =
             ffi::eglCreateContext(display, config, ffi::EGL_NO_CONTEXT, CONTEXT_ATTRIBS.as_ptr());
         if context == ffi::EGL_NO_CONTEXT {
+            ffi::alog(4, "egl: no context");
             return Err(());
         }
+        ffi::alog(3, "egl: context ok");
         let surface = ffi::eglCreateWindowSurface(display, config, native, std::ptr::null());
         if surface == ffi::EGL_NO_SURFACE {
+            ffi::alog(4, "egl: no surface");
             return Err(());
         }
         if ffi::eglMakeCurrent(display, surface, surface, context) == 0 {
+            ffi::alog(4, "egl: make current failed");
             return Err(());
         }
+        ffi::alog(3, "egl: current ok");
         ffi::eglSwapInterval(display, 1);
-        let viewport = (window.width() as i32, window.height() as i32);
-        Ok((display, surface, renderer::Renderer::new(viewport)))
+        // The Blade's panel is 480x853; the window hint lies. Ask EGL.
+        let (mut vw, mut vh) = (0, 0);
+        if ffi::eglQuerySurface(display, surface, ffi::EGL_WIDTH, &mut vw) == 0
+            || ffi::eglQuerySurface(display, surface, ffi::EGL_HEIGHT, &mut vh) == 0
+            || vw <= 0
+            || vh <= 0
+        {
+            ffi::alog(4, "egl: query surface failed");
+            return Err(());
+        }
+        ffi::alog(3, &format!("egl: surface {}x{}", vw, vh));
+        Ok((display, surface, renderer::Renderer::new((vw, vh))))
     }
 }
 
@@ -126,6 +144,14 @@ fn destroy_egl(display: ffi::EGLDisplay) {
 
 #[cfg(target_os = "android")]
 fn android_main_impl(app: AndroidApp) {
+    ffi::alog(3, "android_main entered");
+    // Keep the display alive while the HUD is foregrounded. Must be called
+    // OUTSIDE poll_events: that call holds the activity's read lock, and
+    // set_window_flags takes the write lock — same-thread deadlock.
+    app.set_window_flags(
+        android_activity::WindowManagerFlags::KEEP_SCREEN_ON,
+        android_activity::WindowManagerFlags::empty(),
+    );
     let shared = Arc::new(poll::Shared::default());
     poll::spawn(shared.clone()).expect("spawn poll thread");
 
@@ -133,8 +159,17 @@ fn android_main_impl(app: AndroidApp) {
     let mut display = ffi::EGL_NO_DISPLAY;
     let mut surface = ffi::EGL_NO_SURFACE;
     let mut quit = false;
+    let mut first_draw_done = false;
+    let mut iterations: u64 = 0;
 
-    while !quit {
+    loop {
+        iterations += 1;
+        if iterations % 200 == 0 {
+            ffi::alog(3, &format!("loop iter {} window={:?}", iterations, app.native_window().is_some()));
+        }
+        if quit {
+            return;
+        }
         app.poll_events(Some(std::time::Duration::from_millis(FRAME_MS)), |event| {
             use android_activity::PollEvent;
             match event {
@@ -142,11 +177,15 @@ fn android_main_impl(app: AndroidApp) {
                     use android_activity::MainEvent;
                     match main {
                         MainEvent::InitWindow { .. } | MainEvent::WindowResized { .. } => {
-                            renderer = None;
-                            if let Ok((disp, surf, ren)) = init_egl(&app) {
-                                display = disp;
-                                surface = surf;
-                                renderer = Some(ren);
+                            // Idempotent: WindowResized also fires after our
+                            // own KEEP_SCREEN_ON flag change; re-initing over
+                            // a live surface fails and blinds the HUD.
+                            if renderer.is_none() {
+                                if let Ok((disp, surf, ren)) = init_egl(&app) {
+                                    display = disp;
+                                    surface = surf;
+                                    renderer = Some(ren);
+                                }
                             }
                         }
                         MainEvent::TerminateWindow { .. } => {
@@ -167,8 +206,21 @@ fn android_main_impl(app: AndroidApp) {
         let blanked = BLANKED.load(Ordering::Relaxed);
         if let Some(r) = renderer.as_ref().filter(|_| !blanked) {
             let model = shared.model.lock().unwrap().clone();
-            let prims = model::build_frame(&model, r.viewport.0, r.viewport.1);
-            let batch = renderer::Batch::build(&prims, r.viewport.0, r.viewport.1);
+            // On elongated panels (Blade: 480x853) lay out a centered
+            // square band — the waveguide optics show the panel center.
+            let (vw, vh) = r.viewport;
+            let (lw, lh, y_off) = if vh > vw + vw / 4 {
+                (vw, vw, (vh - vw) / 2)
+            } else {
+                (vw, vh, 0)
+            };
+            let mut prims = model::build_frame(&model, lw, lh);
+            if y_off > 0 {
+                for prim in prims.iter_mut() {
+                    prim.shift_y(y_off);
+                }
+            }
+            let batch = renderer::Batch::build(&prims, vw, vh);
             r.draw(&batch);
             unsafe {
                 ffi::eglSwapBuffers(display, surface);
@@ -179,6 +231,24 @@ fn android_main_impl(app: AndroidApp) {
 
 #[cfg(target_os = "android")]
 static BLANKED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+#[cfg(target_os = "android")]
+fn main_event_name(e: &android_activity::MainEvent) -> &'static str {
+    use android_activity::MainEvent;
+    match e {
+        MainEvent::Resume { .. } => "Resume",
+        MainEvent::Pause {} => "Pause",
+        MainEvent::InitWindow { .. } => "InitWindow",
+        MainEvent::TerminateWindow { .. } => "TerminateWindow",
+        MainEvent::WindowResized { .. } => "WindowResized",
+        MainEvent::RedrawNeeded { .. } => "RedrawNeeded",
+        MainEvent::GainedFocus => "GainedFocus",
+        MainEvent::LostFocus => "LostFocus",
+        MainEvent::InputAvailable => "InputAvailable",
+        MainEvent::Destroy => "Destroy",
+        _ => "other",
+    }
+}
 
 #[cfg(target_os = "android")]
 #[no_mangle]
