@@ -44,6 +44,70 @@ pub struct HudResponse {
     pub tags: Vec<Tag>,
 }
 
+/// One misplaced-object candidate from a head-mounted tick.
+#[derive(Debug, Deserialize)]
+pub struct TickCandidate {
+    #[serde(default)]
+    pub target: String,
+    #[serde(default)]
+    pub action: String,
+}
+
+/// The /v1/tick payload.
+#[derive(Debug, Deserialize)]
+pub struct TickResponse {
+    #[serde(default)]
+    pub room_id: String,
+    #[serde(default)]
+    pub scene_class: String,
+    #[serde(default)]
+    pub candidates: Vec<TickCandidate>,
+}
+
+/// Minimal HTTP/1.1 POST with a JSON body.
+pub fn http_post(url: &str, body: &str) -> std::io::Result<String> {
+    let (hostport, path) = split_url(url);
+    let mut stream = TcpStream::connect(hostport)?;
+    stream.set_read_timeout(Some(Duration::from_secs(30)))?;
+    stream.set_write_timeout(Some(Duration::from_secs(30)))?;
+    let request = format!(
+        "POST {path} HTTP/1.1\r\nHost: {hostport}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+        body.len(),
+        body
+    );
+    stream.write_all(request.as_bytes())?;
+    let mut raw = Vec::new();
+    stream.read_to_end(&mut raw)?;
+    let text = String::from_utf8_lossy(&raw);
+    let body_start = match text.find("\r\n\r\n") {
+        Some(i) => i + 4,
+        None => return Err(std::io::Error::new(std::io::ErrorKind::InvalidData, "no header")),
+    };
+    Ok(text[body_start..].to_string())
+}
+
+/// Adopt tick candidates into the render model as fresh tags.
+pub fn apply_tick(shared: &Shared, response: &TickResponse, now: u64) {
+    let mut model = shared.model.lock().unwrap();
+    if !response.room_id.is_empty() {
+        model.room = response.room_id.clone();
+    }
+    model.tag_titles = response
+        .candidates
+        .iter()
+        .map(|c| {
+            if c.action.is_empty() {
+                c.target.clone()
+            } else {
+                c.action.clone()
+            }
+        })
+        .collect();
+    model.tag_ages = response.candidates.iter().map(|_| 0).collect();
+    model.connected = true;
+    model.tick = now;
+}
+
 /// State shared between the poll thread and the render loop.
 #[derive(Default)]
 pub struct Shared {

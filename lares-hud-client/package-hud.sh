@@ -28,14 +28,23 @@ trap 'rm -rf "$WORK"' EXIT
     --target-sdk-version 28 \
     -o "$WORK/base.apk"
 
-# 2. Add the native library for armeabi-v7a (stored, aligned later).
+# 2. Compile the Java camera shim to dex.
+CLASSES="$WORK/classes"
+mkdir -p "$CLASSES"
+"$JAVA_HOME/bin/javac" -classpath "$PLATFORM" -d "$CLASSES" \
+    "$CRATE_DIR/java/dev/randozart/lares/hud/CameraShim.java"
+CLASS_FILES=$(find "$CLASSES" -name '*.class')
+"$BT/d8" --release --min-api 21 --lib "$PLATFORM" --output "$WORK" $CLASS_FILES
+
+# 3. Add dex + native library for armeabi-v7a (stored, aligned later).
 mkdir -p "$WORK/lib/armeabi-v7a"
 cp "$SO" "$WORK/lib/armeabi-v7a/"
-python3 - "$WORK/base.apk" "$WORK/lib/armeabi-v7a/liblares_hud_client.so" <<'PYEOF'
+python3 - "$WORK/base.apk" "$WORK/lib/armeabi-v7a/liblares_hud_client.so" "$WORK/classes.dex" <<'PYEOF'
 import sys, zipfile
-apk, so = sys.argv[1], sys.argv[2]
+apk, so, dex = sys.argv[1], sys.argv[2], sys.argv[3]
 with zipfile.ZipFile(apk, 'a') as z:
     z.write(so, 'lib/armeabi-v7a/liblares_hud_client.so', compress_type=zipfile.ZIP_STORED)
+    z.write(dex, 'classes.dex', compress_type=zipfile.ZIP_DEFLATED)
 PYEOF
 
 # 3. Align and sign with the debug key.

@@ -16,6 +16,8 @@ mod model;
 mod poll;
 
 #[cfg(target_os = "android")]
+mod camera;
+#[cfg(target_os = "android")]
 mod ffi;
 #[cfg(target_os = "android")]
 mod renderer;
@@ -31,29 +33,30 @@ use std::sync::Arc;
 #[cfg(target_os = "android")]
 const FRAME_MS: u64 = 16;
 
-/// The Blade temple touchpad surfaces as directional keys; any of them
-/// toggles the blank layer for now (one interaction, that's it).
+/// The Blade temple touchpad surfaces as directional keys. Center tap =
+/// head-mounted capture + tick; side taps toggle the blank layer; Back
+/// is left to the system so it exits the activity.
 #[cfg(target_os = "android")]
-fn consume_input(app: &AndroidApp) {
+fn handle_input(event: &android_activity::input::InputEvent) -> android_activity::InputStatus {
     use android_activity::{InputStatus, input::{InputEvent, KeyAction}};
     use android_activity::input::Keycode;
 
-    if let Ok(mut iter) = app.input_events_iter() {
-        while iter.next(|event| match event {
-            InputEvent::KeyEvent(key) => {
-                if key.action() == KeyAction::Down && key.key_code() == Keycode::Back {
-                    // Back is the exit path: leave it to the system.
-                    return InputStatus::Unhandled;
-                }
-                if key.action() == KeyAction::Down {
+    if let InputEvent::KeyEvent(key) = event {
+        ffi::alog(3, &format!("key: {:?} action {:?}", key.key_code(), key.action()));
+        if key.action() == KeyAction::Down && key.key_code() == Keycode::Back {
+            return InputStatus::Unhandled;
+        }
+        if key.action() == KeyAction::Down {
+            match key.key_code() {
+                Keycode::DpadCenter => CAPTURE_REQUEST.store(true, Ordering::Relaxed),
+                _ => {
                     let now = !BLANKED.load(Ordering::Relaxed);
                     BLANKED.store(now, Ordering::Relaxed);
                 }
-                InputStatus::Handled
             }
-            _ => InputStatus::Unhandled,
-        }) {}
+        }
     }
+    InputStatus::Handled
 }
 
 #[cfg(target_os = "android")]
@@ -161,6 +164,9 @@ fn android_main_impl(app: AndroidApp) {
     let mut quit = false;
     let mut first_draw_done = false;
     let mut iterations: u64 = 0;
+    // The input receiver is single-tenant: create it once and keep it for
+    // the app's lifetime; later calls return InputUnavailable.
+    let mut input_iter: Option<android_activity::input::InputIterator> = None;
 
     loop {
         iterations += 1;
@@ -172,6 +178,10 @@ fn android_main_impl(app: AndroidApp) {
         }
         app.poll_events(Some(std::time::Duration::from_millis(FRAME_MS)), |event| {
             use android_activity::PollEvent;
+            match &event {
+                PollEvent::Main(main) => ffi::alog(3, &format!("event: {}", main_event_name(main))),
+                _ => {}
+            }
             match event {
                 PollEvent::Main(main) => {
                     use android_activity::MainEvent;
@@ -194,7 +204,21 @@ fn android_main_impl(app: AndroidApp) {
                             display = ffi::EGL_NO_DISPLAY;
                             surface = ffi::EGL_NO_SURFACE;
                         }
-                        MainEvent::InputAvailable => consume_input(&app),
+                        MainEvent::InputAvailable => {
+                            // Drop any previous receiver first — the guard
+                            // refuses a new iterator while the old one lives.
+                            input_iter = None;
+                            match app.input_events_iter() {
+                                Ok(mut iter) => {
+                                    let mut consumed = 0;
+                                    while iter.next(handle_input) {
+                                        consumed += 1;
+                                    }
+                                    ffi::alog(3, &format!("consumed {}", consumed));
+                                }
+                                Err(e) => ffi::alog(4, &format!("iter err: {e:?}")),
+                            }
+                        }
                         MainEvent::Destroy => quit = true,
                         _ => {}
                     }
@@ -202,6 +226,11 @@ fn android_main_impl(app: AndroidApp) {
                 _ => {}
             }
         });
+
+        // Center tap requested a head-mounted tick? (Consumes the flag.)
+        if CAPTURE_REQUEST.swap(false, Ordering::Relaxed) {
+            run_tick(&app, &shared);
+        }
 
         let blanked = BLANKED.load(Ordering::Relaxed);
         if let Some(r) = renderer.as_ref().filter(|_| !blanked) {
@@ -231,6 +260,67 @@ fn android_main_impl(app: AndroidApp) {
 
 #[cfg(target_os = "android")]
 static BLANKED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+#[cfg(target_os = "android")]
+static CAPTURE_REQUEST: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Head-mounted tick: capture through the camera shim, POST /v1/tick,
+/// adopt the candidates as tags. Runs on the render thread — the ~4s
+/// block shows the last frame, which is exactly what the user is
+/// pointing at anyway.
+#[cfg(target_os = "android")]
+fn run_tick(app: &AndroidApp, shared: &Arc<poll::Shared>) {
+    ffi::alog(3, "tick: capturing");
+    let Some(jpeg) = camera::capture_jpeg(app.vm_as_ptr(), app.activity_as_ptr()) else {
+        ffi::alog(4, "tick: capture failed");
+        shared.model.lock().unwrap().connected = false;
+        return;
+    };
+    let upload = if jpeg.len() > 400_000 { downscale(jpeg) } else { jpeg };
+    let body = serde_json::json!({
+        "roomId": "kitchen",
+        "frameJpeg": base64_encode(&upload),
+        "roomArea": "ROOM_AREA_UNSPECIFIED",
+    });
+    let url = format!("{}/v1/tick", poll::SERVER_URL);
+    ffi::alog(3, "tick: posting");
+    match poll::http_post(&url, &body.to_string()) {
+        Ok(response_body) => match serde_json::from_str::<poll::TickResponse>(&response_body) {
+            Ok(parsed) => {
+                ffi::alog(3, &format!("tick: {} candidates", parsed.candidates.len()));
+                poll::apply_tick(shared, &parsed, poll::tick_now());
+            }
+            Err(e) => ffi::alog(4, &format!("tick parse: {e}")),
+        },
+        Err(e) => {
+            ffi::alog(4, &format!("tick post: {e}"));
+            shared.model.lock().unwrap().connected = false;
+        }
+    }
+}
+
+/// Naive half-scale JPEG passthrough: the server downscales anyway, so
+/// only oversized frames are trimmed by raw byte cropping is unsafe —
+/// instead just cap by returning the frame as-is (the sidecar resizes).
+#[cfg(target_os = "android")]
+fn downscale(jpeg: Vec<u8>) -> Vec<u8> {
+    jpeg
+}
+
+#[cfg(target_os = "android")]
+fn base64_encode(bytes: &[u8]) -> String {
+    const TABLE: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let mut out = String::with_capacity(bytes.len().div_ceil(3) * 4);
+    for chunk in bytes.chunks(3) {
+        let b = [chunk[0], *chunk.get(1).unwrap_or(&0), *chunk.get(2).unwrap_or(&0)];
+        let n = ((b[0] as u32) << 16) | ((b[1] as u32) << 8) | (b[2] as u32);
+        out.push(TABLE[(n >> 18) as usize & 63] as char);
+        out.push(TABLE[(n >> 12) as usize & 63] as char);
+        out.push(if chunk.len() > 1 { TABLE[(n >> 6) as usize & 63] as char } else { '=' });
+        out.push(if chunk.len() > 2 { TABLE[n as usize & 63] as char } else { '=' });
+    }
+    out
+}
 
 #[cfg(target_os = "android")]
 fn main_event_name(e: &android_activity::MainEvent) -> &'static str {
