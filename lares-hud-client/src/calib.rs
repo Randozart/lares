@@ -186,8 +186,9 @@ fn solve_linear(a: &[[f64; 8]; 8], b: &[f64; 8]) -> Option<[f64; 8]> {
             if factor == 0.0 {
                 continue;
             }
-            for c in col..8 {
-                m[r][c] -= factor * m[col][c];
+            let row: [f64; 8] = m[col];
+            for (c, val) in row.iter().enumerate() {
+                m[r][c] -= factor * val;
             }
             rhs[r] -= factor * rhs[col];
         }
@@ -197,73 +198,6 @@ fn solve_linear(a: &[[f64; 8]; 8], b: &[f64; 8]) -> Option<[f64; 8]> {
         *slot = rhs[i] * (1.0 / m[i][i]);
     }
     Some(out)
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn identity_solves_and_projects() {
-        // Non-collinear spread (a grid) — collinear sets are degenerate.
-        let pts = [(0.1, 0.1), (0.8, 0.15), (0.15, 0.8), (0.85, 0.9), (0.5, 0.5)];
-        let pairs: Vec<Pair> = pts
-            .iter()
-            .map(|p| Pair { display: *p, camera: *p })
-            .collect();
-        let (to_display, _) = solve(&pairs).unwrap();
-        let (x, y) = project(&to_display, (0.3, 0.15)).unwrap();
-        assert!((x - 0.3).abs() < 1e-6 && (y - 0.15).abs() < 1e-6);
-    }
-
-    #[test]
-    fn synthetic_perspective_recovers() {
-        // A genuine projective map with perspective terms.
-        let h = Homography { m: [1.2, 0.1, 0.05, -0.05, 0.9, 0.2, 0.0004, -0.0003, 1.0] };
-        let cams = [(0.1, 0.9), (0.5, 0.1), (0.9, 0.8), (0.2, 0.3), (0.7, 0.5)];
-        let pairs: Vec<Pair> = cams
-            .iter()
-            .map(|camera| {
-                let display = project(&h, *camera).unwrap();
-                Pair { display, camera: *camera }
-            })
-            .collect();
-        let (to_display, _) = solve(&pairs).unwrap();
-        for pair in &pairs {
-            let (x, y) = project(&to_display, pair.camera).unwrap();
-            assert!((x - pair.display.0).abs() < 1e-6, "x mismatch: {x}");
-            assert!((y - pair.display.1).abs() < 1e-6, "y mismatch: {y}");
-        }
-    }
-
-    #[test]
-    fn fewer_than_four_pairs_is_none() {
-        let pairs = vec![Pair { display: (0.1, 0.1), camera: (0.2, 0.2) }];
-        assert!(solve(&pairs).is_none());
-    }
-
-    #[test]
-    fn degenerate_collinear_is_none() {
-        let pairs: Vec<Pair> = (0..5)
-            .map(|i| Pair {
-                display: (i as f64 * 0.1, i as f64 * 0.1),
-                camera: (i as f64 * 0.2, i as f64 * 0.2),
-            })
-            .collect();
-        assert!(solve(&pairs).is_none());
-    }
-
-    #[test]
-    fn file_round_trip() {
-        let text = format!(
-            "cd {}\ndc {}\n",
-            row_string(&[1.0; 9]),
-            row_string(&[2.0; 9])
-        );
-        let (cd, dc) = parse_file(&text).unwrap();
-        assert_eq!(cd.m, [1.0; 9]);
-        assert_eq!(dc.m, [2.0; 9]);
-    }
 }
 
 // ── Device state ─────────────────────────────────────────────────────
@@ -361,4 +295,71 @@ pub fn project_panel(camera: (f64, f64)) -> Option<(i32, i32)> {
     let (cd, _) = guard.as_ref()?;
     let (fx, fy) = project(cd, camera)?;
     Some(((fx * CALIB_PANEL as f64) as i32, (fy * CALIB_PANEL as f64) as i32))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn identity_solves_and_projects() {
+        // Non-collinear spread (a grid) — collinear sets are degenerate.
+        let pts = [(0.1, 0.1), (0.8, 0.15), (0.15, 0.8), (0.85, 0.9), (0.5, 0.5)];
+        let pairs: Vec<Pair> = pts
+            .iter()
+            .map(|p| Pair { display: *p, camera: *p })
+            .collect();
+        let (to_display, _) = solve(&pairs).unwrap();
+        let (x, y) = project(&to_display, (0.3, 0.15)).unwrap();
+        assert!((x - 0.3).abs() < 1e-6 && (y - 0.15).abs() < 1e-6);
+    }
+
+    #[test]
+    fn synthetic_perspective_recovers() {
+        // A genuine projective map with perspective terms.
+        let h = Homography { m: [1.2, 0.1, 0.05, -0.05, 0.9, 0.2, 0.0004, -0.0003, 1.0] };
+        let cams = [(0.1, 0.9), (0.5, 0.1), (0.9, 0.8), (0.2, 0.3), (0.7, 0.5)];
+        let pairs: Vec<Pair> = cams
+            .iter()
+            .map(|camera| {
+                let display = project(&h, *camera).unwrap();
+                Pair { display, camera: *camera }
+            })
+            .collect();
+        let (to_display, _) = solve(&pairs).unwrap();
+        for pair in &pairs {
+            let (x, y) = project(&to_display, pair.camera).unwrap();
+            assert!((x - pair.display.0).abs() < 1e-6, "x mismatch: {x}");
+            assert!((y - pair.display.1).abs() < 1e-6, "y mismatch: {y}");
+        }
+    }
+
+    #[test]
+    fn fewer_than_four_pairs_is_none() {
+        let pairs = vec![Pair { display: (0.1, 0.1), camera: (0.2, 0.2) }];
+        assert!(solve(&pairs).is_none());
+    }
+
+    #[test]
+    fn degenerate_collinear_is_none() {
+        let pairs: Vec<Pair> = (0..5)
+            .map(|i| Pair {
+                display: (i as f64 * 0.1, i as f64 * 0.1),
+                camera: (i as f64 * 0.2, i as f64 * 0.2),
+            })
+            .collect();
+        assert!(solve(&pairs).is_none());
+    }
+
+    #[test]
+    fn file_round_trip() {
+        let text = format!(
+            "cd {}\ndc {}\n",
+            row_string(&[1.0; 9]),
+            row_string(&[2.0; 9])
+        );
+        let (cd, dc) = parse_file(&text).unwrap();
+        assert_eq!(cd.m, [1.0; 9]);
+        assert_eq!(dc.m, [2.0; 9]);
+    }
 }

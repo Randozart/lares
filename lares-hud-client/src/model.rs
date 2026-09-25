@@ -284,7 +284,7 @@ pub fn build_menu_frame(
         if is_selected {
             // Selector: filled arrow marker left of the row.
             let ax = margin;
-            out.push(Prim::Fill { x: ax, y: y, w: 2 * scale, h: line, level: Level::Full });
+            out.push(Prim::Fill { x: ax, y, w: 2 * scale, h: line, level: Level::Full });
             out.push(Prim::Fill { x: ax + 2 * scale, y: y + scale, w: scale, h: line - 2 * scale, level: Level::Full });
         }
         let label = if *item == "WIPE" {
