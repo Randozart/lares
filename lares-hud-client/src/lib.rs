@@ -104,13 +104,17 @@ fn handle_input(event: &android_activity::input::InputEvent) -> android_activity
             MotionAction::Up => {
                 if let Some(pointer) = motion.pointers().next() {
                     let sx = SWIPE_START_X.swap(-1, Ordering::Relaxed);
-                    let sy = SWIPE_START_Y.load(Ordering::Relaxed);
+                    let sy = SWIPE_START_Y.swap(-1, Ordering::Relaxed);
                     if sx >= 0 {
                         let dx = (pointer.x() as i32 - sx).abs();
-                        let dy = (pointer.y() as i32 - sy).abs();
-                        if ui_screen() == SCREEN_MENU && dy > 60 && dy > dx {
-                            ui_menu_move(if (pointer.y() as i32) < sy { -1 } else { 1 });
-                        } else if dx > 60 && dx >= dy {
+                        let dy = pointer.y() as i32 - sy;
+                        let ady = dy.abs();
+                        if ui_screen() == SCREEN_MENU && ady > 60 && ady > dx {
+                            ui_menu_move(if dy < 0 { -1 } else { 1 });
+                        } else if ui_screen() == SCREEN_HUD && dy > 60 && dy > dx {
+                            // Downward swipe: wipe current findings.
+                            WIPE_REQUEST.store(true, Ordering::Relaxed);
+                        } else if dx > 60 && dx >= ady {
                             let now = !BLANKED.load(Ordering::Relaxed);
                             BLANKED.store(now, Ordering::Relaxed);
                         }
@@ -345,6 +349,7 @@ fn android_main_impl(app: AndroidApp) {
             } else if in_menu {
                 model::build_menu_frame(
                     MENU_SELECTED.load(Ordering::Relaxed),
+                    &wipe_pause_label(),
                     lw,
                     lh,
                     poll::tick_now(),
@@ -398,6 +403,38 @@ static QUIT_REQUEST: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBo
 #[cfg(target_os = "android")]
 static SWIPE_START_Y: std::sync::atomic::AtomicI32 = std::sync::atomic::AtomicI32::new(-1);
 
+/// Wipe gesture: pause auto-ticks for this many seconds (0 = refresh next tick).
+#[cfg(target_os = "android")]
+static WIPE_PAUSE_SECS: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(30);
+
+/// Auto-ticks stay suppressed until this instant (ms epoch).
+#[cfg(target_os = "android")]
+static WIPE_PAUSE_UNTIL: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+#[cfg(target_os = "android")]
+static WIPE_REQUEST: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+#[cfg(target_os = "android")]
+fn wipe_pause_label() -> String {
+    match WIPE_PAUSE_SECS.load(Ordering::Relaxed) {
+        0 => "OFF".to_string(),
+        s if s < 60 => format!("{s}S"),
+        s => format!("{}M", s / 60),
+    }
+}
+
+#[cfg(target_os = "android")]
+fn wipe_pause_cycle() {
+    let options = [0u32, 30, 60, 300];
+    let current = WIPE_PAUSE_SECS.load(Ordering::Relaxed);
+    let next = options
+        .iter()
+        .find(|v| **v > current)
+        .copied()
+        .unwrap_or(options[0]);
+    WIPE_PAUSE_SECS.store(next, Ordering::Relaxed);
+}
+
 #[cfg(target_os = "android")]
 pub const SCREEN_HUD: u8 = 0;
 #[cfg(target_os = "android")]
@@ -429,7 +466,8 @@ fn ui_menu_activate() {
             calib::start_calib();
             ui_set_screen(SCREEN_HUD);
         }
-        _ => ui_set_screen(SCREEN_HUD), // RESUME
+        2 => wipe_pause_cycle(),                          // WIPE pause
+        _ => ui_set_screen(SCREEN_HUD),                   // RESUME
     }
 }
 
@@ -660,7 +698,7 @@ mod tests {
     #[test]
     fn menu_preview_renders() {
         let (w, h) = (480, 480);
-        let prims = crate::model::build_menu_frame(0, w, h, 0);
+        let prims = crate::model::build_menu_frame(0, "30S", w, h, 0);
         let lit: usize = prims
             .iter()
             .map(|p| match p {

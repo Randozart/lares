@@ -250,10 +250,18 @@ pub fn build_calib_frame(stage: i32, w: i32, h: i32, tick: u64) -> Vec<Prim> {
 }
 
 /// Menu rows in display order.
-pub const MENU_ITEMS: [&str; 3] = ["EXIT", "CALIBRATE", "RESUME"];
+pub const MENU_ITEMS: [&str; 4] = ["EXIT", "CALIBRATE", "WIPE", "RESUME"];
 
 /// Build the settings menu frame with the given row selected.
-pub fn build_menu_frame(selected: usize, w: i32, h: i32, tick: u64) -> Vec<Prim> {
+///
+/// `wipe_label` renders inside the WIPE row (the pause setting).
+pub fn build_menu_frame(
+    selected: usize,
+    wipe_label: &str,
+    w: i32,
+    h: i32,
+    tick: u64,
+) -> Vec<Prim> {
     let scale = font_scale(w);
     let margin = MARGIN * scale;
     let line = LINE * scale;
@@ -279,7 +287,12 @@ pub fn build_menu_frame(selected: usize, w: i32, h: i32, tick: u64) -> Vec<Prim>
             out.push(Prim::Fill { x: ax, y: y, w: 2 * scale, h: line, level: Level::Full });
             out.push(Prim::Fill { x: ax + 2 * scale, y: y + scale, w: scale, h: line - 2 * scale, level: Level::Full });
         }
-        text(&mut out, item, margin + pitch * 2, y, scale, level);
+        let label = if *item == "WIPE" {
+            format!("WIPE {wipe_label}")
+        } else {
+            (*item).to_string()
+        };
+        text(&mut out, &label, margin + pitch * 2, y, scale, level);
         y += line + gap;
     }
 
