@@ -289,11 +289,26 @@ def _dark_blobs(
 
 
 def _calib_pips(req: CalibRequest) -> CalibResponse:
-    """Find dark calibration-marker blobs on one frame."""
+    """Find dark calibration-marker blobs on one frame.
+
+    Logs frame luminance diagnostics at several thresholds so missed
+    detections can be tuned from the journal alone.
+    """
     image = _decode(req.image_b64).convert("L")
     arr = np.asarray(image)
+    total = arr.size
+    mean = float(arr.mean())
+    stats = []
+    for threshold in (60, 80, 120, 160):
+        dark_frac = float((arr < threshold).sum()) / total
+        blobs = _dark_blobs(arr, threshold, req.min_area, req.max_area)
+        top = f"({blobs[0].x:.0f},{blobs[0].y:.0f} a{blobs[0].area})" if blobs else "-"
+        stats.append(f"t{threshold}: dark {dark_frac:.2f} blobs {len(blobs)} top {top}")
+        if threshold == req.dark_threshold:
+            kept = blobs
+    print(f"[calib] mean {mean:.0f} | " + " | ".join(stats), flush=True)
     return CalibResponse(
-        blobs=_dark_blobs(arr, req.dark_threshold, req.min_area, req.max_area),
+        blobs=kept,
         frame_w=image.width,
         frame_h=image.height,
     )
