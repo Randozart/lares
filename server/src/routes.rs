@@ -537,9 +537,14 @@ async fn tick(
         return Err(ApiError::bad_request("frameJpeg is required"));
     }
     let detections = frozen
-        .detect_queries(&req.frame_jpeg, lares_core::engine::frozen::TICK_QUERIES, 0.3)
+        .detect_queries(&req.frame_jpeg, lares_core::engine::frozen::TICK_QUERIES, FROZEN_TICK_THRESHOLD)
         .await
         .map_err(ApiError::internal)?;
+    let detection_summary: Vec<String> = detections
+        .iter()
+        .map(|d| format!("{} {:.2}", lares_core::engine::frozen::bare_label(&d.label), d.score))
+        .collect();
+    tracing::info!(labels = ?detection_summary, "tick detections");
     let (labels, boxes) = lares_core::engine::frozen::tick_inputs(&detections);
     let relations = if labels.len() >= 2 {
         frozen
@@ -662,6 +667,10 @@ async fn tick(
 
 /// Maximum misplaced-object candidates a single tick may surface.
 const MAX_TICK_CANDIDATES: usize = 4;
+
+/// Detection threshold for tick frames — lower than audit scans: Blade
+/// optics are weak, and the norm judge filters false positives anyway.
+const FROZEN_TICK_THRESHOLD: f32 = 0.22;
 
 /// Load the stored reference image for a room, if any.
 async fn load_reference(state: &AppState, room_id: &str) -> Result<Option<Vec<u8>>, ApiError> {

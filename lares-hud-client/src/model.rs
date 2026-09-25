@@ -57,6 +57,8 @@ pub struct HudModel {
     pub tag_ages: Vec<i64>,
     /// Whether the last poll succeeded (drives the status line).
     pub connected: bool,
+    /// Transient status override for the bottom line ("TICK...").
+    pub status: String,
     /// Monotonic seconds, for the blink cursor.
     pub tick: u64,
 }
@@ -151,9 +153,15 @@ pub fn build_frame(model: &HudModel, w: i32, h: i32) -> Vec<Prim> {
         text(&mut out, "CLEAR", margin, y, scale, Level::Dim);
     }
 
-    // Status line: connection + blink cursor.
-    let status = if model.connected { "LARES" } else { "NO LINK" };
-    text(&mut out, status, margin, status_y, scale, if model.connected { Level::Dim } else { Level::Full });
+    // Status line: transient status, else connection + blink cursor.
+    let (status, level) = if !model.status.is_empty() {
+        (model.status.clone(), Level::Full)
+    } else if model.connected {
+        ("LARES".into(), Level::Dim)
+    } else {
+        ("NO LINK".into(), Level::Full)
+    };
+    text(&mut out, &status, margin, status_y, scale, level);
     if model.tick.is_multiple_of(2) {
         out.push(Prim::Fill {
             x: w - margin - 4 * scale,

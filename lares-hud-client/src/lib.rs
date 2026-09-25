@@ -38,25 +38,52 @@ const FRAME_MS: u64 = 16;
 /// is left to the system so it exits the activity.
 #[cfg(target_os = "android")]
 fn handle_input(event: &android_activity::input::InputEvent) -> android_activity::InputStatus {
-    use android_activity::{InputStatus, input::{InputEvent, KeyAction}};
-    use android_activity::input::Keycode;
+    use android_activity::input::MotionAction;
+    use android_activity::{InputStatus, input::{InputEvent, KeyAction, Keycode}};
 
-    if let InputEvent::KeyEvent(key) = event {
-        ffi::alog(3, &format!("key: {:?} action {:?}", key.key_code(), key.action()));
-        if key.action() == KeyAction::Down && key.key_code() == Keycode::Back {
-            return InputStatus::Unhandled;
-        }
-        if key.action() == KeyAction::Down {
-            match key.key_code() {
-                Keycode::DpadCenter => CAPTURE_REQUEST.store(true, Ordering::Relaxed),
-                _ => {
-                    let now = !BLANKED.load(Ordering::Relaxed);
-                    BLANKED.store(now, Ordering::Relaxed);
+    match event {
+        // The Blade touchpad tap surfaces as Menu (DpadCenter on some
+        // firmwares): both trigger a head-mounted tick.
+        InputEvent::KeyEvent(key) => {
+            ffi::alog(3, &format!("key: {:?} action {:?}", key.key_code(), key.action()));
+            if key.action() == KeyAction::Down && key.key_code() == Keycode::Back {
+                return InputStatus::Unhandled;
+            }
+            if key.action() == KeyAction::Down {
+                match key.key_code() {
+                    Keycode::Menu | Keycode::DpadCenter => {
+                        CAPTURE_REQUEST.store(true, Ordering::Relaxed)
+                    }
+                    _ => {
+                        let now = !BLANKED.load(Ordering::Relaxed);
+                        BLANKED.store(now, Ordering::Relaxed);
+                    }
                 }
             }
+            InputStatus::Handled
         }
+        // Swipes beyond 60px toggle the blank layer.
+        InputEvent::MotionEvent(motion) => match motion.action() {
+            MotionAction::Down => {
+                if let Some(pointer) = motion.pointers().next() {
+                    SWIPE_START_X.store(pointer.x() as i32, Ordering::Relaxed);
+                }
+                InputStatus::Handled
+            }
+            MotionAction::Up => {
+                if let Some(pointer) = motion.pointers().next() {
+                    let start = SWIPE_START_X.swap(-1, Ordering::Relaxed);
+                    if start >= 0 && ((pointer.x() as i32) - start).abs() > 60 {
+                        let now = !BLANKED.load(Ordering::Relaxed);
+                        BLANKED.store(now, Ordering::Relaxed);
+                    }
+                }
+                InputStatus::Handled
+            }
+            _ => InputStatus::Unhandled,
+        },
+        _ => InputStatus::Unhandled,
     }
-    InputStatus::Handled
 }
 
 #[cfg(target_os = "android")]
@@ -227,9 +254,14 @@ fn android_main_impl(app: AndroidApp) {
             }
         });
 
-        // Center tap requested a head-mounted tick? (Consumes the flag.)
-        if CAPTURE_REQUEST.swap(false, Ordering::Relaxed) {
+        // Center tap = immediate tick; otherwise the continuous stream
+        // re-ticks every AUTO_TICK_MS while the display is live.
+        let manual = CAPTURE_REQUEST.swap(false, Ordering::Relaxed);
+        let due = now_ms() - LAST_TICK_MS.load(Ordering::Relaxed) > AUTO_TICK_MS;
+        if (manual || due) && !TICK_RUNNING.swap(true, Ordering::Relaxed) {
+            LAST_TICK_MS.store(now_ms(), Ordering::Relaxed);
             run_tick(&app, &shared);
+            TICK_RUNNING.store(false, Ordering::Relaxed);
         }
 
         let blanked = BLANKED.load(Ordering::Relaxed);
@@ -264,6 +296,28 @@ static BLANKED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::n
 #[cfg(target_os = "android")]
 static CAPTURE_REQUEST: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
+#[cfg(target_os = "android")]
+static TICK_RUNNING: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Continuous clutter identification: auto-tick cadence.
+#[cfg(target_os = "android")]
+const AUTO_TICK_MS: u64 = 12_000;
+
+#[cfg(target_os = "android")]
+static LAST_TICK_MS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+#[cfg(target_os = "android")]
+fn now_ms() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0)
+}
+
+/// X coordinate of an in-progress touch swipe (motion tracking).
+#[cfg(target_os = "android")]
+static SWIPE_START_X: std::sync::atomic::AtomicI32 = std::sync::atomic::AtomicI32::new(-1);
+
 /// Head-mounted tick: capture through the camera shim, POST /v1/tick,
 /// adopt the candidates as tags. Runs on the render thread — the ~4s
 /// block shows the last frame, which is exactly what the user is
@@ -271,9 +325,12 @@ static CAPTURE_REQUEST: std::sync::atomic::AtomicBool = std::sync::atomic::Atomi
 #[cfg(target_os = "android")]
 fn run_tick(app: &AndroidApp, shared: &Arc<poll::Shared>) {
     ffi::alog(3, "tick: capturing");
+    shared.model.lock().unwrap().status = "TICK...".into();
     let Some(jpeg) = camera::capture_jpeg(app.vm_as_ptr(), app.activity_as_ptr()) else {
         ffi::alog(4, "tick: capture failed");
-        shared.model.lock().unwrap().connected = false;
+        let mut model = shared.model.lock().unwrap();
+        model.status = "TICK FAIL".into();
+        model.connected = false;
         return;
     };
     let upload = if jpeg.len() > 400_000 { downscale(jpeg) } else { jpeg };
@@ -389,6 +446,7 @@ mod tests {
             tag_titles: vec!["SOCKS".into(), "CUP".into(), "BOOK".into()],
             tag_ages: vec![5, 120, 900],
             connected: true,
+            status: String::new(),
             tick: 0,
         };
         let (w, h) = (192, 384);
