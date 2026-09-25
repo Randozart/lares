@@ -5,6 +5,17 @@
 
 use crate::font;
 
+/// One directional overlay mark projected from a detection.
+#[derive(Debug, Clone)]
+pub struct OverlayMark {
+    /// Panel x in pixels.
+    pub x: i32,
+    /// Panel y in pixels.
+    pub y: i32,
+    /// Short label under the dot.
+    pub label: String,
+}
+
 /// Brightness level for a primitive (mono waveguide: luminance only).
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum Level {
@@ -59,6 +70,8 @@ pub struct HudModel {
     pub connected: bool,
     /// Transient status override for the bottom line ("TICK...").
     pub status: String,
+    /// Directional overlay marks (panel px + label) from the tick loop.
+    pub overlay: Vec<OverlayMark>,
     /// Monotonic seconds, for the blink cursor.
     pub tick: u64,
 }
@@ -153,6 +166,33 @@ pub fn build_frame(model: &HudModel, w: i32, h: i32) -> Vec<Prim> {
         text(&mut out, "CLEAR", margin, y, scale, Level::Dim);
     }
 
+    // Directional overlay: crosshair dot + contained label per mark.
+    for mark in &model.overlay {
+        let mx = mark.x.clamp(4 * scale, w - 4 * scale);
+        let my = mark.y.clamp(line + gap + 4 * scale, status_y - gap - 4 * scale);
+        let (r, g, bl) = (0.0, 1.0, 0.55);
+        let _ = (r, g, bl);
+        // Small center dot + crosshair arms (1px strokes, scale 2).
+        let cs = 2;
+        out.push(Prim::Fill { x: mx - cs, y: my - cs, w: 2 * cs, h: 2 * cs, level: Level::Full });
+        out.push(Prim::HLine { x: mx - 3 * cs, y: my, len: 2 * cs, level: Level::Full });
+        out.push(Prim::HLine { x: mx + cs, y: my, len: 2 * cs, level: Level::Full });
+        out.push(Prim::VLine { x: mx, y: my - 3 * cs, len: 2 * cs, level: Level::Full });
+        out.push(Prim::VLine { x: mx, y: my + cs, len: 2 * cs, level: Level::Full });
+
+        // Label at half scale, anchored to stay inside the panel.
+        let label_scale = (scale / 2).max(1);
+        let mut label = mark.label.clone();
+        let max_w = w - 2 * margin;
+        while font::text_width(&label) * label_scale > max_w && label.len() > 1 {
+            label.pop();
+        }
+        let lw = font::text_width(&label) * label_scale;
+        let lx = if mx + lw > w - margin { mx - lw } else { mx };
+        let ly = if my + 5 * scale + line > h { my - line - 3 * scale } else { my + 3 * scale };
+        text(&mut out, &label, lx.clamp(margin, w - margin), ly, label_scale, Level::Full);
+    }
+
     // Status line: transient status, else connection + blink cursor.
     let (status, level) = if !model.status.is_empty() {
         (model.status.clone(), Level::Full)
@@ -163,6 +203,90 @@ pub fn build_frame(model: &HudModel, w: i32, h: i32) -> Vec<Prim> {
     };
     text(&mut out, &status, margin, status_y, scale, level);
     if model.tick.is_multiple_of(2) {
+        out.push(Prim::Fill {
+            x: w - margin - 4 * scale,
+            y: h - gap - 3 * scale,
+            w: 4 * scale,
+            h: 3 * scale,
+            level: Level::Full,
+        });
+    }
+    out
+}
+
+/// Build the calibration frame: marker dot at the stage position + step.
+pub fn build_calib_frame(stage: i32, w: i32, h: i32, tick: u64) -> Vec<Prim> {
+    let scale = font_scale(w);
+    let margin = MARGIN * scale;
+    let line = LINE * scale;
+
+    let mut out = Vec::with_capacity(1024);
+    out.push(Prim::Frame { x: 0, y: 0, w, h, level: Level::Mid });
+    text(&mut out, &format!("CAL {}/5", stage + 1), margin, line, scale, Level::Full);
+    out.push(Prim::HLine { x: 2, y: line + GAP * scale + 2 * scale, len: w - 4, level: Level::Mid });
+
+    let positions = crate::calib::CALIB_POSITIONS;
+    let stage_idx = stage.clamp(0, 4) as usize;
+    for (i, (fx, fy)) in positions.iter().enumerate() {
+        let px = (fx * w as f64) as i32;
+        let py = (fy * h as f64) as i32;
+        let level = if i == stage_idx {
+            if tick.is_multiple_of(2) { Level::Full } else { Level::Mid }
+        } else {
+            Level::Dim
+        };
+        out.push(Prim::Fill {
+            x: px - 2 * scale,
+            y: py - 2 * scale,
+            w: 4 * scale,
+            h: 4 * scale,
+            level,
+        });
+    }
+
+    let status_y = h - line - GAP * scale;
+    text(&mut out, "DIE UNDER DOT + TAP", margin, status_y, scale, Level::Mid);
+    out
+}
+
+/// Menu rows in display order.
+pub const MENU_ITEMS: [&str; 3] = ["EXIT", "CALIBRATE", "RESUME"];
+
+/// Build the settings menu frame with the given row selected.
+pub fn build_menu_frame(selected: usize, w: i32, h: i32, tick: u64) -> Vec<Prim> {
+    let scale = font_scale(w);
+    let margin = MARGIN * scale;
+    let line = LINE * scale;
+    let gap = GAP * scale;
+
+    let pitch = PITCH * scale;
+
+    let mut out = Vec::with_capacity(2048);
+    out.push(Prim::Frame { x: 0, y: 0, w, h, level: Level::Mid });
+    text(&mut out, "LARES", margin, line, scale, Level::Full);
+    let hint = format!("{}/{}", selected + 1, MENU_ITEMS.len());
+    let hw = font::text_width(&hint) * scale;
+    text(&mut out, &hint, w - margin - hw, line, scale, Level::Dim);
+    out.push(Prim::HLine { x: 2, y: line + gap + 2 * scale, len: w - 4, level: Level::Mid });
+
+    let mut y = line + gap + 2 * scale + line + gap;
+    for (i, item) in MENU_ITEMS.iter().enumerate() {
+        let is_selected = i == selected.min(MENU_ITEMS.len() - 1);
+        let level = if is_selected { Level::Full } else { Level::Dim };
+        if is_selected {
+            // Selector: filled arrow marker left of the row.
+            let ax = margin;
+            out.push(Prim::Fill { x: ax, y: y, w: 2 * scale, h: line, level: Level::Full });
+            out.push(Prim::Fill { x: ax + 2 * scale, y: y + scale, w: scale, h: line - 2 * scale, level: Level::Full });
+        }
+        text(&mut out, item, margin + pitch * 2, y, scale, level);
+        y += line + gap;
+    }
+
+    // Footer hint + blink cursor.
+    let status_y = h - line - gap;
+    text(&mut out, "SWIPE+TAP", margin, status_y, scale, Level::Dim);
+    if tick.is_multiple_of(2) {
         out.push(Prim::Fill {
             x: w - margin - 4 * scale,
             y: h - gap - 3 * scale,

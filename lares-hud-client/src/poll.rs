@@ -51,6 +51,22 @@ pub struct TickCandidate {
     pub target: String,
     #[serde(default)]
     pub action: String,
+    /// Detection box, 0-1000 normalized [ymin, xmin, ymax, xmax].
+    #[serde(rename = "box", default)]
+    pub bbox: Option<NormBox>,
+}
+
+/// A normalized 0-1000 box (protojson shape).
+#[derive(Debug, Deserialize, Default, Clone, Copy)]
+pub struct NormBox {
+    #[serde(default)]
+    pub ymin: i32,
+    #[serde(default)]
+    pub xmin: i32,
+    #[serde(default)]
+    pub ymax: i32,
+    #[serde(default)]
+    pub xmax: i32,
 }
 
 /// The /v1/tick payload.
@@ -62,6 +78,28 @@ pub struct TickResponse {
     pub scene_class: String,
     #[serde(default)]
     pub candidates: Vec<TickCandidate>,
+}
+
+/// The /calib/pips payload (sidecar): blobs + decoded frame size.
+#[derive(Debug, Deserialize)]
+pub struct CalibBlobs {
+    #[serde(default)]
+    pub blobs: Vec<CalibBlob>,
+    #[serde(default)]
+    pub frame_w: u32,
+    #[serde(default)]
+    pub frame_h: u32,
+}
+
+/// One dark blob in decoded-frame pixels.
+#[derive(Debug, Deserialize)]
+pub struct CalibBlob {
+    #[serde(default)]
+    pub x: f64,
+    #[serde(default)]
+    pub y: f64,
+    #[serde(default)]
+    pub area: u32,
 }
 
 /// Minimal HTTP/1.1 POST with a JSON body.
@@ -86,7 +124,7 @@ pub fn http_post(url: &str, body: &str) -> std::io::Result<String> {
     Ok(text[body_start..].to_string())
 }
 
-/// Adopt tick candidates into the render model as fresh tags.
+/// Adopt tick candidates into the render model as fresh tags + overlay.
 pub fn apply_tick(shared: &Shared, response: &TickResponse, now: u64) {
     let mut model = shared.model.lock().unwrap();
     if !response.room_id.is_empty() {
@@ -104,7 +142,20 @@ pub fn apply_tick(shared: &Shared, response: &TickResponse, now: u64) {
         })
         .collect();
     model.tag_ages = response.candidates.iter().map(|_| 0).collect();
+    model.overlay = response
+        .candidates
+        .iter()
+        .filter_map(|c| {
+            let bbox = c.bbox?;
+            let cx = (bbox.xmin + bbox.xmax) as f64 / 2000.0;
+            let cy = (bbox.ymin + bbox.ymax) as f64 / 2000.0;
+            let (px, py) = crate::calib::project_panel((cx, cy))?;
+            let label = if c.action.is_empty() { c.target.clone() } else { c.action.clone() };
+            Some(crate::model::OverlayMark { x: px, y: py, label })
+        })
+        .collect();
     model.connected = true;
+    model.status.clear();
     model.tick = now;
 }
 

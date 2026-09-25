@@ -13,6 +13,7 @@ import io
 import os
 import threading
 
+import numpy as np
 import torch
 from fastapi import FastAPI, HTTPException
 from PIL import Image, ImageOps
@@ -86,6 +87,34 @@ class RelateResponse(BaseModel):
 
     device: str
     triplets: list[dict]
+
+
+class CalibRequest(BaseModel):
+    """Dark-blob detection for boresight calibration frames."""
+
+    image_b64: str
+    dark_threshold: int = 80
+    min_area: int = 3
+    max_area: int = 400
+
+
+class Blob(BaseModel):
+    """One dark blob: centroid + metrics."""
+
+    x: float
+    y: float
+    area: int
+    w: int
+    h: int
+    fill: float
+
+
+class CalibResponse(BaseModel):
+    """Detected blobs, largest first, plus decoded frame size."""
+
+    blobs: list[Blob]
+    frame_w: int
+    frame_h: int
 
 
 class RoomRequest(BaseModel):
@@ -214,6 +243,63 @@ def _relate(req: RelateRequest) -> RelateResponse:
     return RelateResponse(device=DEVICE, triplets=out)
 
 
+def _dark_blobs(
+    arr, dark_threshold: int, min_area: int, max_area: int
+) -> list[Blob]:
+    """Label dark connected components; return round-ish blobs."""
+    height, width = arr.shape
+    dark = arr < dark_threshold
+    visited = np.zeros_like(dark, dtype=bool)
+    blobs = []
+    for y0, x0 in zip(*np.nonzero(dark)):
+        if visited[y0, x0]:
+            continue
+        stack = [(y0, x0)]
+        visited[y0, x0] = True
+        pixels = []
+        while stack:
+            y, x = stack.pop()
+            pixels.append((y, x))
+            for dy, dx in ((1, 0), (-1, 0), (0, 1), (0, -1)):
+                ny, nx = y + dy, x + dx
+                if 0 <= ny < height and 0 <= nx < width and dark[ny, nx] and not visited[ny, nx]:
+                    visited[ny, nx] = True
+                    stack.append((ny, nx))
+        if not (min_area <= len(pixels) <= max_area):
+            continue
+        ys = [p[0] for p in pixels]
+        xs = [p[1] for p in pixels]
+        w = max(xs) - min(xs) + 1
+        h = max(ys) - min(ys) + 1
+        if w > 3 * h or h > 3 * w:
+            continue
+        fill = len(pixels) / (w * h)
+        if fill < 0.5:
+            continue
+        blobs.append(Blob(
+            x=round(sum(xs) / len(xs), 1),
+            y=round(sum(ys) / len(ys), 1),
+            area=len(pixels),
+            w=w,
+            h=h,
+            fill=round(fill, 2),
+        ))
+    blobs.sort(key=lambda b: b.area, reverse=True)
+    return blobs[:10]
+
+
+def _calib_pips(req: CalibRequest) -> CalibResponse:
+    """Find dark calibration-marker blobs on one frame."""
+    image = _decode(req.image_b64).convert("L")
+    arr = np.asarray(image)
+    return CalibResponse(
+        blobs=_dark_blobs(arr, req.dark_threshold, req.min_area, req.max_area),
+        frame_w=image.width,
+        frame_h=image.height,
+    )
+
+
 app.add_api_route("/detect", _detect, methods=["POST"], response_model=DetectResponse)
+app.add_api_route("/calib/pips", _calib_pips, methods=["POST"], response_model=CalibResponse)
 app.add_api_route("/room", _room, methods=["POST"], response_model=RoomResponse)
 app.add_api_route("/relate", _relate, methods=["POST"], response_model=RelateResponse)
